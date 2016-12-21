@@ -1,0 +1,2241 @@
+; Trantor Command processor  -*-PALX-*-
+
+dsect <
+uich::	 .blkw 1 		; user input channel
+uoch::	 .blkw 1 		; user output channel
+cbsize:: .blkw 1	 	; buffer size
+cendp::	 .blkw 1 		; ptr to end of input line
+cbufp::	 .blkw 1 		; ptr to next character to read in buffer
+lcmdb==120.	 		; length of command buffer
+cbuf::	 .blkb lcmdb 		; command buffer
+errflg:: .blkw 1	 	; ptr to error message
+uname::	 .blkw 1 		; user name (rad50)
+ready::  .blkw 1		; number of ready messages
+diskno:: .blkw 1		; current disk unit number
+diskn1:: .blkw 1		; used by move command
+filep::	 .blkw 1 		; ptr to filename buffer (next entry!)
+filnam:: .blkw 4	 	; filename
+	 .blkw 4 		; used by rename
+	 >,lcs
+
+
+.macro	type text
+	push uoch(r4)
+	call writec
+	  .string ^~text~
+.endm
+
+.macro	tdtype x
+	push uoch(r4),#%td'x
+	call wchar
+.endm
+
+
+.macro	err text
+	.string ^~text~,%.ttmp
+	mov #%.ttmp,errflg(r4)
+.endm
+
+
+cp:	push #0,#80. 		; SETSS args: process id, size
+	call setss 		; set our stack size large
+	pop * 			; val: error code
+	if ne,<
+	  lose 0
+	  >
+	push #lcs/2 		; ALOCL arg: size
+	call alocl 		; allocate data area for us
+	pop r4 			; val: ptr
+	mov #lcmdb,cbsize(r4) 	; set command buffer size
+	clr ready(r4)		; set number of readys to 0
+	mov r4,filep(r4) 	; set FILEP to FILNAM
+	add #filnam,filep(r4) 	; ...
+ifSAO <
+	mov #70700,uname(r4)
+	mov #70700,filnam(r4)	; set SAO's default dir to RH;
+      >
+	clr diskno(r4)		; use disk number zero by default
+	clr diskn1(r4)		; clear just in case
+	push #0 		; GETUIO arg: process id (zero = self)
+	call getuio 		; get user input and user output channels
+	pop uoch(r4),uich(r4),* ; vals: output ch, input ch, error code
+	push uoch(r4),#%tdclr 	; WCHAR args: channel id, character
+	call wchar 		; clear screen
+	push #tvn 		; IOAC arg: Trantor version no.
+	push uoch(r4) 		; IOAC arg: channel id
+	call ioac 		; print greeting message
+ifMIT <
+  .if eq  sysexp
+	.string ^"Trantor ^d: MIT Math Department, Cambridge Mass.
+"
+  .endc
+  .else
+	.string ^"Trantor ^dX: MIT Math Department, Cambridge Mass.
+"
+  .endc
+      >
+ifSAO <
+        .string ^"Trantor ^x.
+"
+      >
+ifMIT <
+	push uoch(r4) 		; PTIME arg1: channel id
+	push #%pttime+%ptdate+%ptday+%ptzone 	; PTIME arg2: cbits
+	call time 		; PTIME args 3 and 4: time lo, time hi
+	call ptime 		; print current time
+	type ^|
+
+Type "help" for information on using the system.
+
+|
+      >
+
+cploop:	push uoch(r4)		; ORDER arg: channel id
+	push #10000+topt,#0	; ORDER arg: order code, order arg
+	call order		; get terminal option word
+	pop r0			; got it
+	bic #%tnech,r0		; clear no output bit
+	push uoch(r4)		; ORDER arg: channel id
+	push #20000+topt,r0	; ORDER args: order code, order arg
+	call order		; set terminal option word
+	pop *			; val: order result (meaningless)
+     	call rdcmdl 		; read command line into buffer
+	call arg 		; skip over leading spaces
+	pop * 			; val: character
+	beq cploop
+	call sarg 		; read a string argument
+	 			; SCASE args: ptr, length
+	push pc 		; SCASE arg3: ptr to list of strings
+	add #cplist-.,(sp) 	; ...
+	call scase 		; lookup command name in list
+	pop r1,* 		; vals: ptr to entry, error code
+	if ne,<
+	  type ^"Illegal command.
+
+"
+	  br cploop
+	  >
+ifMIT <
+	tst uname(r4) 		; logged in?
+	if eq,<
+	  cmp r1,#cpls1   	; command allowed when not logged in?
+	  if his,<
+	    type ^"You must login to use that command.
+
+"
+	    br cploop
+	    >
+	  >
+      >
+
+        push uich(r4)		; ORDER arg: channel id
+	push #20000+tbreak,#0	; ORDER arg: order code, order arg
+	call order		; set tbreak back to zero
+        pop *
+	jsr pc,@2(r1) 		; call routine for this command
+	push uoch(r4)		; ORDER arg: channel id
+	push #10000+topt,#0	; ORDER arg: order code, order arg
+	call order		; get terminal option word
+	pop r0			; got it
+	bic #%tnech,r0		; clear no output bit
+	push uoch(r4)		; ORDER arg: channel id
+	push #20000+topt,r0	; ORDER args: order code, order arg
+	call order		; set terminal option word
+	pop *			; val: order result (meaningless)
+	tst errflg(r4) 		; error message to print?
+	if ne,<
+	  push uoch(r4),errflg(r4) 	; WRITEZ args: channel, asciz ptr
+	  call writez 		; print error message
+	  jsr pc,crlf		; output CRLF
+	  jsr pc,crlf		; output another
+	  clr errflg(r4) 	; clear error flag
+	  >
+	mov filep(r4),r1	; get pointer to filename
+	add #10,r1		; get end of filename
+	push -(r1),-(r1)	; IOAC args: extension, 2nd filename
+	push -(r1),-(r1)	; IOAC args: 1st filename, directory name
+ifMIT <
+.if eq  <sysdsk-drl>
+	push diskno(r4)		; get disk number
+	add #71176,(sp)		; add offset to get diskname (RL0)
+.endc
+.if eq  <sysdsk-drp>
+	push diskno(r4)		; get disk number
+	add #71436,(sp)		; add offset to get diskname (RP0)
+.endc
+      >
+ifSAO <
+	push diskno(r4)		; get disk number
+	add #72136,(sp)		; add offset to get diskname (RX0)
+      >
+        inc ready(r4)		; another command executed
+	push ready(r4),uoch(r4)	; IOAC args: number and channel id
+	call ioac		; print ready message
+	.string ^"r  ^4z  ^r:^r;^r^r.^r
+"
+	br cploop
+
+
+; JMP here to report expected argument missing.
+eeam:	err ^"Expected argument missing"
+	rts pc
+
+
+; JMP here with error code in R0.
+comerr:	push r0			; ERRMSG arg: error code
+	call errmsg		; get error message
+	pop errflg(r4)		; val: ptr to asciz string
+	rts pc
+
+.macro	defcom a,names
+	.irp n,<names>
+	  .string ^"n",%.ctmp
+	  .word %.ctmp,a
+	  .endm
+.endm defcom
+
+cplist:
+       .word 4 		; no. of bytes per entry
+	defcom login,<login,l>
+	defcom logout,<logout,bye>
+ifMIT <
+.lif ne 0
+	defcom help,<help>
+      >
+        defcom flowon,<flowon>
+	defcom flowof,<flowoff>
+	defcom cmoron,<moreon>
+	defcom cmorof,<moreoff>
+	defcom clistc,<?>
+	defcom pstime,<time>
+	defcom dyofwk,<what_day,day_of_week>
+	defcom systat,<systat>
+	defcom shutdn,<shutdown>
+	defcom nshtdn,<stayup>
+	defcom stty,<set_tty,stty>
+	defcom messag,<message,motd>
+	defcom rug,<rug>
+
+; The commands from CPLS1 can only be used while logged in.
+cpls1:				   
+.lif ne  asmtrl
+	defcom trollr,<trollr,ed>
+.lif ne  asmcns
+	defcom consol,<console,co>
+	defcom df,<delete,df>
+	defcom dfp,<delete_file_paranoid,dfp>
+	defcom ren,<rename>
+	defcom copy,<copy,clone>
+	defcom move,<move>
+	defcom print,<print>
+	defcom sptype,<type>
+	defcom spinpr,<spinprint,sp>
+
+.if ne nlp
+	defcom tpl,<tpl>
+	defcom frmfed,<form_feed,ff>
+.if ne 0
+	defcom tplsys,<tpl_systat,ts>
+	defcom tplld,<tpl_list_directory,tpl_ld,td>
+	defcom tpllu,<tpl_list_users,tpl_lu,tu>
+	defcom tplla,<tpl_list_all,tpl_la,ta>
+.endc
+.endc
+	defcom uic,<uic>
+.if ne 0			; don't assemble now
+	defcom cd,<create_directory,cd>
+	defcom dd,<delete_directory,dd>
+.endc
+	defcom ld,<list_directory,ld>
+	defcom lall,<list_all,la>
+	defcom lu,<list_users,lu>
+.lif ne asmcdc
+	defcom u200,<u200>
+.if ne  asmtek
+	defcom tekplt,<tekplot>
+.lif ne 0
+	defcom teksnd,<teksend>
+.lif ne 0
+	defcom memplt,<memory_plot>
+.endc
+.if ne 0			; don't assemble to save space
+        defcom procpr,<list_processes>
+	defcom memlst,<list_memory>
+.endc
+	.word 0 		; terminator
+
+.sbttl	Commands
+
+; RUG command -- go to debugger
+rug:	tst rugsta		; were we started from a rug?
+	if ne,<
+	  bpt
+	  >
+	rts pc
+
+; LOGIN command.
+login:
+ifMIT <
+	tst timsts		; time known?
+	if eq,<			; no
+	  err ^"Please set the time before logging in."
+	  rts pc
+	  >
+      >
+	call arg   		; ignore leading spaces
+	pop * 			; was the break character a NULL (end of line)?
+	if eq,<
+	  err ^"No user name specified."
+	  rts pc
+	  >
+	call cvr50   		; convert user id spec to rad50
+	pop *,r1 		; vals: word 2, word 1
+	mov r1,uname(r4)   	; set user name
+ifMIT <
+          push uoch(r4)		; include Channel Number
+	  push r1,ttych+0	; output login message to system console
+	  call ioac
+	    .string ^"Login for ^r on TTY# ^d at "
+	  push ttych+0		; PTIME arg: channel id
+	  push #%pttime+%ptdate+%ptslsh	; PTIME arg: control bits
+	  call time		; PTIME args: time lo, time hi
+	  call ptime		; print the time on the system console
+	  push ttych+0
+	  call writec
+	    .string ^"
+"
+	  >
+	jsr pc,messag		; print message of the day if any
+	clr diskno(r4)		; start on disk 0
+	push diskno(r4)		; DUICLK arg: disk unit number
+	push r1   		; DUICLK arg: dir name
+	jsr r5,duiclk   	; see if user has directory
+	pop r0,*   		; vals: block ptr, error code
+	if ne,<
+	  mov (pc)+,r1   	; no directory of own
+	   .rad50 "rh "
+	  >
+	else <
+	  push r0   		; DRELB arg: block ptr
+	  jsr r5,drelb   	; release directory block
+	  pop *   		; val: error code
+	  >
+	mov filep(r4),r0 	; ptr to FILNAM
+	mov r1,(r0)+   		; set directory in default
+	mov #50561,(r0)+   	; set filename to MAIL
+	mov #45400,(r0)+
+	mov uname(r4),(r0)+   	; set extention to login name
+	sub #10,r0 		; ptr to FILNAM again
+	push pc 		; ATTACH arg: device name
+	add #dskn-.,(sp) 	; ...
+	push r0,diskno(r4),#0	; ATTACH args: filename,unit #,cbits
+	call attach 		; open file
+	pop r0,* 		; vals: channel id, error code
+	if ne,<
+	  err ^"No mail."
+	  rts pc
+	  >
+	push r0 		; DETACH arg: channel id
+	call detach 		; close mail file
+	err ^"You have mail."
+	rts pc
+
+
+; LOGOUT command.
+logout:
+ifMIT <
+        tst uname(r4)		; someone logged in logging out??
+	if ne,<
+	  push uoch(r4)		; include channeld id
+	  push uname(r4),ttych+0	; output logout message to
+	  call ioac		; system console
+	    .string ^"Logout for ^r on TTY# ^d at "
+	  push ttych+0		; PTIME arg: channel id
+	  push #%pttime+%ptdate+%ptslsh	; PTIME arg: control bits
+	  call time		; PTIME args: time lo, time hi
+	  call ptime		; print the time on the system console
+	  push ttych+0
+	  call writec
+	    .string ^"
+"
+          >
+	>
+	push uoch(r4)		; TMSG arg: channel id
+	jsr r5,tmsg		; print console free message
+	  .string ^"Console free at "
+	push r4 		; FREE arg: ptr
+	call free 		; free CP's data block
+	pop * 			; remove return PC from stack
+	call getpid		; get our process id
+	mov pc,r4		; get ptr to PIDTB
+	add #pidtb-.,r4
+	mov #ntty,r3
+loop <	  cmp (r4)+,(sp)	; search PIDTB for this process's process ID
+	  exitl eq
+	  sorl r3
+	  crash ^"PID not in PIDTB"
+	  >
+	tst (sp)+		; pop off our process ID
+	mov #-1,prqtb-pidtb-2(r4)	; request ourselves to be killed
+	push #0,pc		; TWONEQ arg: value, address
+	call twoneq		; wait this word (the jsr instruction) = 0
+				; ie. wait for the rest of our life.
+	crash ^"JSR has opcode 0!"
+
+; MESSAGE prints out the file MESSAG.OTD on disk 0 if it exits.
+; MESSAGE command
+
+messag:	push r0			; save r0
+	push pc			; ATTACH arg: device name
+	add #dskn-.,(sp)	; ...
+	push pc			; ATTACH arg: filename
+	add #msgfil-.,(sp)	; ...
+	push #0,#0		; ATTACH args: unit #,cbits
+	call attach		; open file
+	pop r0,*		; vals: channel id, error code
+	bne 1$			; error: no file or an error in attach
+	push uoch(r4)		; XFRCHN arg: write channel id
+	push r0			; XFRCHN arg: read channel id
+	call xfrchn		; Transfer the file from disk to TTY
+	push r0			; DETACH arg: channel id
+	call detach		; release channel
+1$:	pop r0			; restore r0,r1
+	rts pc
+
+msgfil:	.rad50 "rh "		; Filename for RH;MESSAG.OTD
+	.rad50 "mes"
+	.rad50 "sag"
+	.rad50 "otd"
+
+
+; SHUTDOWN command.
+
+shutdn:	call arg		; clear whitespace
+	pop *			; ...
+	if eq,<			; if no argument, assume 1 minute
+	  mov #2,r0		; one minute for shutdown
+	  br 1$
+	  >
+	call numarg		; read a number (argument)
+	pop r0			; got it
+	inc r0			; in case immediate shutdown
+1$:	mov r0,sysc 		; turn on bit to shutdown system
+ifMIT <
+	jmp logout		; log this person out
+      >
+ifSAO <
+	rts pc
+      >
+
+nshtdn:	clr sysc		; someone doesn't want the system shutdown
+	rts pc
+
+ifMIT <
+.if ne 0
+; HELP command.
+help:	type ^|This is the MIT Math Department's PDP11 computer system.
+You may give commands to the system by typing a command name and
+striking the RETURN key.  The command name may be optionally followed 
+by a space and one or more arguments to the command, each separated by
+a space.  To see a list of command names type "?".
+|
+	rts pc
+.endc
+      >
+
+;;; Flowon turns XON/XOFF flow control on for that terminal connection.
+
+flowon:	call getlnn		; get our terminal line number
+	push r0			; ALGMOD arg: Asynchronous line number
+	call algmod		; get the modes for this line
+	pop r1			; val: modes
+	bis #%alxon,r1		; turn on XON/XOF flow control
+	br flow			; go to the common code
+
+;;; Flowoff turns off XON/XOFF flow control for that terminal connection.
+
+flowof:	call getlnn		; get our line number
+	push r0			; ALGMOD arg: asychronous line number
+	call algmod		; get the modes for this line
+	pop r1			; val: modes
+	bic #%alxon+%alstp,r1	; turn off flow control and turn ouput on
+
+;;; Fall through to common code.
+
+flow:	push r0,r1		; ALSMOD args: Aline no., modes for line
+	call alsmod		; set the modes
+	rts pc
+
+;;; Routine to get the asynchronous line number of our terminal
+;;; and return it in R0
+
+getlnn:	mov pc,r3		; get ptr to TTAB
+	add #ttab-.,r3		; ...
+	mov pc,r1		; get ptr to TTYCH
+	add #ttych-.,r1		; ....
+	mov #ntty,r0		; get number of TTYs
+loop <	  cmp uoch(r4),(r1)+	; is this our terminal output channel #
+	  exitl eq		; yes
+	  add #lttab,r3		; move to next TTAB entry
+	  sorl r0		; do NTTY
+	  crash ^"Unknown terminal channel id."
+	  >
+	mov tlinen(r3),r0	; return asyncronous line number in R0
+	return
+
+; MOREON command. Turn on *-MORE-* processing
+cmoron:	call moron
+	rts pc
+
+; MOREOFF command. Turn off *-MORE-* processing
+cmorof: call moroff
+	rts pc
+
+; ? Command.
+clistc:	push pc			; LISTC arg: ptr to command list
+	add #cplist-.,(sp)	; ...
+	call listc
+	rts pc
+
+
+; LISTC
+
+;	ARGS:				VALS:
+; SP ->	ptr to command list		(none)
+
+listc:	jsr r5,save6		; save regs
+	mov 16(sp),r1		; pick up argument: ptr to command list
+	tst (r1)+		; skip 1st word
+loop <	  call quit		; see if user wants to quit
+	  pop *			; val: non-zero if break typed
+	  exitl ne		; ....
+	  mov (r1),r0 		; ptr to next command name
+	  exitl eq
+	  push uoch(r4),r0 	; WRITEZ args: channel id, ptr
+	  call writez 		; print command name
+	  push uoch(r4)		; ORDER arg: channel id
+	  push #10000+thpos,#0	; ORDER args: order code, order argument
+	  call order		; read hpos from TTY DIM
+	  pop r3		; val: order result (hpos)
+	  mov r3,r0
+	  clr r2		; for DIV
+	  div #24.,r2		; move to next multiple of 24
+	  sub #24.,r3
+	  sub r3,r0
+	  cmp r0,#71.
+	  if his,<
+	     jsr pc,crlf	; output a CRLF
+	     >
+	   else <
+	     push uoch(r4),#%tdhmv	; WCHAR args: channel id, character
+	     call wchar		; issue 1st half of horizontal move command
+	     inc r0		; positions are passed one based
+	     push uoch(r4),r0	; WCHAR args: channel id, character
+	     call wchar		; issue 2nd half of horizontal move
+	     >
+	  add @16(sp),r1	; move to next entry on list
+	  rptl
+	  >
+	jsr pc,crlf		; output a CRLF
+	jsr r5,rest6		; restore regs
+	pop (sp)		; remove argument from stack
+	return
+
+.sbttl	Status commands
+
+; TIME command.  Print and set time.
+pstime:	clr r1			; change time marker
+pstim1:	call arg  		; move to argument
+	pop r0			; val: character
+	beq 3$			; no argument, just go print
+	call time  		; get current time
+	call cvbtd  		; convert to more usable form
+	  			; CVBTD vals: seconds, minutes, hours,
+	  			; day, month, year, day of week
+loop <	  tst r0  		; end of command line?
+	  exitl eq
+	  call numarg		; read no.
+	  call rdcmdc		; get character after no.
+	  pop r0		; val: character
+	  cmp r0,#':  		; time?
+	  beq 1$
+	  cmp r0,#'/  		; date?
+	  beq 2$
+	  pop *  		; pop off NUMARG result
+	  err ^"Argument isn't a date or time."
+	  exitl
+1$:	  pop 4(sp)  		; set hours
+	  call numarg		; get minutes
+	  pop 2(sp)		; val: no.
+	  call rdcmdc		; get character after minutes
+	  pop r0		; val: character
+	  cmp r0,#':  		; seconds specified?
+	  rptl ne
+	  call numarg		; get seconds
+	  pop (sp)		; val: no.
+	  call rdcmdc		; get character
+	  pop r0		; val: character
+	  rptl
+2$:	  pop 10(sp)  		; set month
+	  call numarg		; get day
+	  pop 6(sp)		; val: no.
+	  call rdcmdc		; read char after day
+	  pop r0		; val: character
+	  cmp r0,#'/  		; year specified?
+	  rptl ne
+	  call numarg		; get year
+	  add #1900.,(sp)	; add 1900 to year typed in
+	  pop 12(sp)		; val: no.
+	  call rdcmdc		; read character after date
+	  pop r0		; val: character
+	  rptl
+	  >
+	call cvdtb  		; convert back to internal form
+	tst r1
+	if eq,<			; if 0 then change time
+	  call timset  		; set time
+	  >
+	else <
+	  pop r2,r3		; save lo and hi times for below call to PTIME
+	  >
+3$:	push uoch(r4)		; PTIME arg1: channel id
+	push #%pttime+%ptsecs+%ptdate+%ptday+%ptzone	; PTIME arg2: cbits
+	tst r1
+	if eq,<			; if 0 then get time
+	  call time  		; PTIME args 3 and 4: time lo, time hi
+	  >
+	else <
+	  push r3,r2		; PTIME args 3 and 4: time lo, time hi
+	  >
+	call ptime		; print time
+	jsr pc,crlf		; output a CRLF
+	rts pc
+
+;  DAY_OF_WEEK command. Prints the day of the week for the specified date
+; but does not alter the date
+
+dyofwk:	mov pc,r1		; set do not change time marker
+	jmp pstim1		; go do it
+
+
+; SYSTAT command.
+systat:	call arg		; argument specified?
+	pop *			; val: character
+	if eq,<			; no argument
+	  push #-1		; use argument of -1 to indicate one time only
+	  >
+	else <			; argument specified
+	  call numarg		; get numeric argument
+				; val: no. (leave on stack)
+	  push uoch(r4)		; ORDER arg: channel id
+	  push #2,#%tcniwt	; ORDER args: order code, order arg
+	  call order		; do BIS #%TCNIWT into control bits
+				; i.e. turn on no wait on input
+	  pop *			; val: order result (meaningless)
+	  >
+1$:	tdtype hom  		; start display at top of screen
+	tdtype eol		; ...
+	call uptime		; get system up time
+	pop r0,r1		; UPTIME vals: uptime hi, uptime lo
+	push r4			; save reg
+	jsr pc,ddiv60		; convert from 60ths to seconds
+	jsr pc,ddiv60		; convert from seconds to minutes
+	jsr pc,ddiv60		; convert minutes to hours and minutes
+	pop r4			; restore reg
+	push npwrf,r2,r1,#tvn	; IOAC args: power fails, minutes, hours,
+				;	     RH version no.
+	push uoch(r4)		; IOAC arg: channel id
+	call ioac
+.if eq sysexp
+	  .string ^"Trantor ^d.  Uptime: ^d hours, ^d minutes.  Power failures: ^d
+"
+.endc
+.else
+	  .string ^"Trantor ^dX.  Uptime: ^d hours, ^d minutes.  Power failures: ^d
+"
+.endc
+
+        push uoch(r4)		; IOAC arg: channel id
+	call ioac		; print message
+	.string ^"Current time: "
+	tst timsts		; time known?
+	if ne,<			; yes
+	  push uoch(r4)			; PTIME arg: channel id
+	  push #%pttime+%ptdate+%ptslsh	; PTIME arg: control bits
+	  call time		; PTIME args: time hi, time lo
+	  call ptime		; print current time
+	  >
+	jsr pc,crlf		; output a CRLF
+	mov fsata+0,r1		; get no. of words allocated
+	sub fsft+0,r1  		; subtract no. freed
+	mov r1,r2  		; copy no. in use
+	mul #100.,r2  		; times 100 for %
+	div fssize,r2  		; divide by size of free area
+	push fsasl		; IOA arg: allocate search loops
+	push fsflen,fsarc	; IOA args: freelist length, allocate reqs
+	push r2,r1,fsac  	; IOA args: % in use, words in use,
+	push fssize  		; blocks in use, free area
+	push uoch(r4)		; IOA arg: channel id
+	call ioac  		; display free storage statistics
+	  .string ^"Free storage statistics:
+    Total free storage area: ^d words
+    In use: ^d blocks using ^d words (^d%)
+    Allocate requests so far: ^d
+    Length of Freelist: ^d    Loops searching freelist: ^d
+"
+	push tpwake+0,tpwake+2		; IOA arg: no. of process wakeups
+	push timout+0,timout+2		; IOA arg: no. of times over quantum
+	push preemc+0,preemc+2		; IOA arg: no. of preemptions
+	push tccnt+0,tccnt+2		; IOA arg: no. of times round TC loop
+	push tblkql,trunql,nproc	; IOA args: blocked, running, total
+	push uoch(r4)			; IOA arg: channel id
+	call ioac
+	  .string ^"Traffic Controller statistics:
+    ^d processes; ^d running, ^d blocked
+    TC loops: ^D         Preemptions: ^D out of ^D
+    Process wakeups so far: ^D
+"
+        push notbmp		; IOAC arg: no. of times bitmap was written
+        push nobnrd		; IOAC arg: no. of blocks not read
+	push nioch  		; IOAC arg: no. of i/o channels in use
+	push uoch(r4)		; IOAC arg: channel id
+	call ioac  		; display io module statistics
+	  .string ^"IO module statistics:
+    Channels in use: ^d
+    Blocks in core when requested: ^d
+    Number of times bit-map was written ^d
+"
+.if ne  nrp
+	push dfree+2		; IOAC arg: number of free blocks
+	push rpwtc,rperrc,rprdc	; IOAC args: errors, writes, reads
+	push uoch(r4)		; IOAC arg: channel id
+	call ioac		; display RP11 statistics
+	  .string ^"RP11 statistics:
+    Reads: ^d    Errors: ^d   Free blocks:
+    Writes: ^d             RP0: ^d
+"
+.endc
+.if ne  nrl
+	push dfree+2,dfree	; IOAC arg: number of free blocks on both
+	push rlwtc,rlerrc,rlrdc	; IOAC args: errors, writes, reads
+	push uoch(r4)		; IOAC arg: channel id
+	call ioac		; display RL11 statistics
+	  .string ^"RL11 statistics:
+    Reads: ^d    Errors: ^d   Free blocks:
+    Writes: ^d             RL0: ^d    RL1: ^d
+"
+.endc
+.if ne  nrk
+	push rkerrc,rkwtc,rkrdc ; IOAC args: errors, writes, reads
+	push uoch(r4)		; IOAC arg: channel id
+	call ioac  		; display RK11 statistics
+	  .string ^"RK11 statistics:
+    Reads: ^d    Writes: ^d
+    Errors: ^d
+"
+.endc
+.if ne  nrx
+	push rxserr,rxcerr,rxperr ; IOAC args: seek errs, CRC errs, parity errs
+	push rxwtc,rxrdc    	; IOAC args: writes, reads
+	push uoch(r4)		; IOAC arg: channel id
+	call ioac  		; display RX11 statistics
+	  .string ^"RX11 statistics:
+    Reads: ^d    Writes: ^d
+    Errors: ^d parity errors, ^d CRC errors, ^d seek errors
+"
+.endc
+.if ne  ndz
+	push dzxcc+0,dzxcc+2	; IOA arg: no. of DZ11 characters transmitted
+	push dzxic+0,dzxic+2	; IOA arg: no. of DZ11 transmitter interrupts
+	push dzrcc+0,dzrcc+2	; IOA arg: no. of DZ11 characters received
+	push dzric+0,dzric+2	; IOA arg: no. of DZ11 receiver interrupts
+	push uoch(r4)		; IOA arg: channel id
+	call ioac		; display DZ11 statistics
+	  .string ^"DZ11 statistics:
+    Receiver interrupts: ^D    Received characters: ^D
+    Transmitter interrupts: ^D    Transmitted characters: ^D
+"
+.endc
+	tdtype eos		; clear rest of screen
+	pop r1			; get time to repeat display
+	if pl,<
+	  call quit		; see if user requests a break
+	  pop *			; val: non-zero if break typed
+	  bne 2$		; ...
+	  mov r1,r3
+	  mul #60.,r3		; convert from seconds to 60ths
+	  push r3		; TWFOR arg: wait time
+	  call twfor		; sleep for time specified by argument
+	  push uoch(r4)		; RCHAR arg: channel id
+	  call rchar		; see if anything typed
+	  pop *			; val: character
+	  if mi,<
+	    push r1		; put back on stack for next time
+	    jmp 1$		; repeat systat
+	    >
+2$:	  push uoch(r4)		; ORDER arg: channel id
+	  push #3,#%tcniwt	; ORDER args: order code, order arg
+	  call order		; do BIC #%TCNIWT into control bits
+				; i.e. turn off no wait on input
+	  pop *			; val: order result (meaningless)
+	  >
+	rts pc
+
+
+; SET_TTY command.
+stty:	call arg		; see if we've got an argument
+	pop *			; val: character
+	if eq,<
+	  jmp eeam
+	  >
+	call sarg		; read string argument
+	push pc			; ptr to list of terminal names
+	add #ttylst-.,(sp)	; ...
+	call scase		; lookup terminal name
+	pop r1,*		; vals: ptr, error code
+	if ne,<
+	  push uoch(r4)		; WRITEC arg: channel id
+	  call writec
+	    .string ^"Terminal name not known.  Valid terminals are:
+"
+	  push pc		; LISTC arg: ptr to command list
+	  add #ttylst-.,(sp)	; ...
+	  call listc		; print list of terminals
+	  rts pc
+	  >
+	tst (r1)+		; skip over terminal name part of entry
+	push uoch(r4)		; ORDER arg: channel id
+	push #20000+tctyp,(r1)+	; ORDER args: order code, order arg
+	call order		; set TCTYP of terminal
+	pop *			; val: order result (meaningless)
+	push uoch(r4)		; ORDER arg: channel id
+	push #20000+thmax,(r1)+	; ORDER args: order code, order arg
+	call order		; set THMAX of terminal
+	pop *			; val: order result (meaningless)
+	push uoch(r4)		; ORDER arg: channel id
+	push #20000+tvmax,(r1)+	; ORDER args: order code, order arg
+	call order		; set TVMAX of terminal
+	pop *			; val: order result (meaningless)
+	push uoch(r4)		; ORDER arg: channel id
+	push #20000+topt,(r1)+	; ORDER args: order code, order arg
+	call order		; set TOPT of terminal
+	pop *			; val: order result (meaningless)
+	mov pc,r3		; get ptr to TTAB
+	add #ttab-.,r3		; ...
+	mov pc,r1		; get ptr to TTYCH
+	add #ttych-.,r1		; ....
+	mov #ntty,r0		; get number of TTYs
+loop <	  cmp uoch(r4),(r1)+	; is this our terminal output channel #
+	  exitl eq		; yes
+	  add #lttab,r3		; move to next TTAB entry
+	  sorl r0		; do NTTY
+	  crash ^"Unknown terminal channel id."
+	  >
+	call ttint		; do terminal initialization
+	rts pc
+
+
+
+; List of SET_TTY terminal names and their characteristics.
+ttylst:	.word 10.		; no. of bytes per entry
+	.string ^"printing",%.s
+	.word %.s,%tntty,132.-1,0.-1,%toovr
+	.string ^"spinwriter",%.s
+	.word %.s,%tntty,132.-1,0.-1,%toovr+%tnxon
+	.string ^"vt52",%.s
+	.word %.s,%tnvt,80.-1,24.-1,%tomor+%tnxon+%todis+%toers+%toabs
+	.string ^"vt100",%.s
+	.word %.s,%tnvt1,80.-1,24.-1,%tomor+%todis+%toers+%toabs
+	.string ^"vt132",%.s
+	.word %.s,%tnvt1,80.-1,24.-1,%tomor+%tnxon+%todis+%toers+%toabs
+	.string ^"vt132_wide",%.s
+	.word %.s,%tnvt1,132.-1,24.-1,%tomor+%tnxon+%todis+%toers+%toabs
+	.if df %tnsb
+	  .string ^"sb",%.s
+	  .word %.s,%tnsb,80.-1,25.-1,%todis+%toers+%toabs+%tocro+%tomor
+	.endc
+	.if df %tnhp
+	  .string ^"hp2645",%.s
+	  .word %.s,%tnhp,80.-1,24.-1,%todis+%toers+%toabs+%tocro+%tomor
+	.endc
+	.if df %tntrm
+	  .string ^"terminet",%.s
+	  .word %.s,%tntrm,120.-1,0.-1,%toovr+%tobs
+	.endc
+	.if df %tnla1
+	  .string ^"la120",%.s
+	  .word %.s,%tnla1,132.-1,0.-1,%toovr+%tobs+%tnxon
+	.endc
+	.string ^"la36",%.s
+	.word %.s,%tntty,132.-1,0.-1,%toovr+%tobs
+	.if df %tnla1
+	  .string ^"la120_wide",%.s
+	  .word %.s,%tnla1,217.-1,0.-1,%toovr+%tobs+%tnxon
+	.endc
+	.word 0			; terminator
+
+
+moroff: push uoch(r4)		; ORDER arg: channel id
+	push #10000+topt,#0	; ORDER args: order code, order code
+	call order		; get terminal options
+	bic #%tomor+%tnech,(sp)	; clear more bits
+	push (sp),(sp)		; make room for channel id
+	mov uoch(r4),4(sp)	; ORDER arg: channel id
+	mov #20000+topt,2(sp)	; ORDER arg: order code
+	call order		; turn off more processing (order arg on stack)
+	pop *			; val: meaningless
+	return
+
+moron:  push uoch(r4)		; ORDER arg: channel id
+	push #10000+topt,#0	; ORDER args: order code, order code
+	call order		; get terminal options
+	bis #%tomor,(sp)	; set more bits
+	push (sp),(sp)		; make room for channel id
+	mov uoch(r4),4(sp)	; ORDER arg: channel id
+	mov #20000+topt,2(sp)	; ORDER arg: order code
+	call order		; turn on More processing (order arg on stack)
+	pop *			; val: meaningless
+	return
+
+.sbttl	File System Commands
+
+; LIST_USERS or LU command.
+lu:	push filep(r4)		; FILEARG arg: filename ptr
+	call filarg		; parse filename if any
+	push diskno(r4),#mfdb	; DGETB args: disk no., block no.
+	jsr r5,dgetb  		; get MFD
+	pop r5,*  		; vals: block ptr, error code
+	mov #8.,r3  		; set up no. of users per line.
+1$:	mov r5,r2  		; get ptr that will inc to first entry
+	sub #6,r2  		; ...
+	mov #<lblk-2>/10,r0  	; no. of entries in MFD
+2$:	call quit		; see if user typed a break
+	pop *			; val: non-zero if break signaled
+	bne 4$			; ....
+	add #10,r2  		; next uic in mfd.
+	dec r0
+	bmi 3$
+	cmpb 1(r2),#1  		; ignore 0,* and 1,*
+	blos 2$
+	push (r2)  		; IOAC arg: directory name
+	push uoch(r4)		; IOAC arg: channel id
+	call ioac  		; type directory name
+	  .string ^"^r   "
+	sob r3,2$  		; typed 8 on this line?
+	jsr pc,crlf		; output a CRLF
+	mov #8.,r3  		; set up no. of users per line.
+	br 2$
+3$:	push r5  		; DGNEXT arg: block ptr
+	jsr r5,dgnext		; get next block of MFD
+	pop r5,*		; DGNEXT vals: ptr, error code
+	beq 1$			; go print more if no error
+	br  5$
+4$:	push r5			; DRELB arg: block to be released
+	jsr r5,drelb		; release this block
+	pop *			; val: error code
+5$:	jsr pc,crlf		; output a CRLF
+	rts pc			; else were finished
+
+
+
+;LIST_ALL prints out a ld of all the directories on the disk
+
+lall:	mov r4,r1		; get pointer to filename buffer
+	add #filnam+12,r1	; ...
+	clr (r1)+		; zero filename
+	clr (r1)+		; ...
+	clr (r1)+		; ...
+	sub #10,r1		; get back pointer to dir name
+	push r1			; FILARG arg: ptr to filename
+	call filarg		; read in file name
+	push diskno(r4),#mfdb	; DGETB args: disk no., block no.
+	jsr r5,dgetb  		; get MFD
+	pop r5,*  		; vals: block ptr, error code
+3$:	mov r5,r2  		; get ptr that will inc to first entry
+	sub #6,r2  		; ...
+	mov #<lblk-2>/10,r0  	; no. of entries in MFD
+1$:	add #10,r2  		; next uic in mfd.
+	dec r0
+	bmi 2$
+	cmpb 1(r2),#1  		; ignore 0,* and 1,*
+	blos 1$
+	mov (r2),(r1)		; change dir name
+	jsr r5,save6		; save registers
+	jsr pc,ld1		; print out directory
+	jsr pc,crlf		; output a crlf
+        jsr r5,rest6		; restore registers
+	br 1$
+2$:	push r5			; DGNEXT arg: block ptr
+	jsr r5,dgnext		; read in next block of MFD
+	pop r5,*		; DGNEXT vals: block ptr,error code
+	beq 3$			; if no error then go print more
+	rts pc
+
+; UIC command.
+uic:	call octarg  		; first number
+	swab (sp)
+	call rdcmdc  		; read break char between numbers
+	pop *			; val: character
+	call octarg  		; second number
+	movb (sp)+,(sp)  	; put together
+	pop filnam+0(r4)	; set default directory name to uic
+
+; fall through to LD
+
+; LIST_DIRECTORY or LD command.
+ld:	mov r4,r1		; ptr to second filename buffer
+	add #filnam+10,r1	; ...
+	mov filnam+0(r4),(r1)+	; copy directory name
+	clr (r1)+		; clear filename
+	clr (r1)+		; ...
+	clr (r1)+		; ...
+	sub #10,r1		; correct for 4 auto-increments
+	push r1			; FILARG arg: ptr to filename buffer
+	call filarg		; read filename argument
+	tdtype clr  		; clear screen
+ld1:	push filnam+10(r4)	; IOAC arg: dir name
+ifMIT <
+.if eq  <sysdsk-drl>
+	push diskno(r4)		; get disk number
+	add #71176,(sp)		; add offset to get diskname (RL0)
+.endc
+.if eq  <sysdsk-drp>
+	push diskno(r4)		; get disk number
+	add #71436,(sp)		; add offset to get diskname (RP0)
+.endc
+      >
+ifSAO <
+	push diskno(r4)		; get disk number
+	add #72136,(sp)		; add offset to get diskname (RX0)
+      >
+	push uoch(r4)		; IOAC arg: channel id
+	call ioac		; print it
+	.string ^"Directory  ^r:^r;
+"
+        push diskno(r4)		; DUICLK arg: disk unit number
+	push filnam+10(r4)	; DUICLK arg: directory name
+	jsr r5,duiclk  		; lookup directory, get first block
+	pop r5,r0  		; vals: block ptr, error code
+	if ne,<
+	  jmp comerr		; goto give error message
+	  >
+	mov filnam+10(r4),filnam+0(r4)	; set default directory name
+	tst filnam+12(r4)	; filename specified in match filename?
+	if ne,<			; yes
+	  mov filnam+12(r4),filnam+2(r4)	; set default filename
+	  mov filnam+14(r4),filnam+4(r4)	; ...
+	  >
+	tst filnam+16(r4)	; extension specified in match filename?
+	if ne,<			; yes
+	  mov filnam+16(r4),filnam+6(r4)	; set default extension
+	  >
+	clr r1  		; init count of blocks in dir
+	mov #4,r0  		; file names per line
+loop <	  mov r5,r2  		; get ptr to first ufd entry
+	  tst (r2)+  		; ...
+	  mov #<lblk-2>/lufde,r3  	; get no. of slots in ufd block
+loop <	    tst (r2)  		; directory slot empty?
+	    beq 1$  		; yes, goto next
+	    tst filnam+12(r4)	; any filename to match?
+	    if ne,<		; yes
+	      cmp (r2),filnam+12(r4)	; does 1st half of filename match?
+	      bne 1$
+	      cmp 2(r2),filnam+14(r4)	; does 2nd half of filename match?
+	      bne 1$
+	      >
+	    tst filnam+16(r4)	; any extension to match?
+	    if ne,<		; yes
+	      cmp 4(r2),filnam+16(r4)	; does extension match?
+	      bne 1$
+	      >
+	    add 14(r2),r1  	; add in length to total
+	    push 14(r2),4(r2),2(r2),(r2)  ; IOAC args: filename, ext, length
+	    push uoch(r4)  	; IOAC arg: channel id
+	    call ioac
+	      .string ^"^r^r.^r^5d"
+	    tstb 21(r2)  	; file locked?
+	    if mi,<
+	      type ^"*"  	; follow length with * for locked files
+	      >
+	    else <
+	      type ^" "
+	      >
+	    dec r0  		; filled a line yet?
+	    if ne,<
+	      type ^"    "
+	      >
+	    else <
+	      jsr pc,crlf	; output a CRLF
+	      mov #4,r0  	; reset count
+	      iot		; hack to give some time to other processes
+	      >
+1$:	    add #lufde,r2
+	    dec r3
+	    rptl ne
+	    >
+	  push r5  		; DGNEXT arg: block ptr
+	  jsr r5,dgnext  	; get next directory block
+	  pop r5,*  		; vals: block ptr, error code
+	  rptl eq
+	  >
+	cmp r0,#4
+	if ne,<
+	  jsr pc,crlf		; output a CRLF
+	  >
+	tst diskno(r4)		; find out which disk we're using
+	if eq,<			; disk 0?
+	  push dfree
+	  >
+	else <			; disk 1 otherwise
+	  push dfree+2
+	  >
+	push r1  		; IOAC args: directory total, system free
+	push uoch(r4)		; IOAC arg: channel id
+	call ioac
+	  .string ^"
+Total blocks used = ^d,  Free blocks = ^d
+"
+	rts pc
+
+.if ne 0
+; CREATE_DIRECTORY or CD command
+
+cd:	push filep(r4)		; FILARG arg: ptr to filename
+	call filarg		; read in filename
+	push diskno(r4),filnam(r4)	; DUICLK args: disk number, dir name
+	jsr r5,duiclk		; see if this dir already exists
+	pop r5,r0		; vals: ptr, error code
+	if eq,<
+	  push r5		; DRELB arg: block pointer
+	  call drelb		; release the UFD
+	  pop r0		; val: error code
+	  type ^"Directory already exits.
+"
+	  rts pc		; exit, don't add this directory
+	  >
+	push diskno(r4),#mfdb	; DGETB args: disk unit #,block number
+	jsr r5,dgetb		; read in the MFD
+	pop r5,*		; vals: block ptr,error code
+1$:	mov r5,r2		; get ptr that will inc to first entry
+	sub #6,r2		; ....
+	mov #<lblk-2>/10,r0	; get number of MFD slots
+loop <	  add #10,r2		; move to next entry
+	  tst (r2)		; see if empty or not
+	  bne 2$		; not empty
+	  tst 2(r2)		; see if a block number there also
+	  bne 2$		; must be zero
+	  mov filnam(r4),(r2)+	; set dir name (we've got an empty slot)
+	  push diskno(r4)	; DALLOC arg: disk number
+	  jsr r5,dalloc		; get us a block for a UFD
+	  pop r3,r0		; vals: block ptr,error code
+	  bne 3$		; if non-zero must have been an error
+	  mov dblk(r3),(r2)+	; set block number of UFD
+	  mov #9.,(r2)+		; 9. words per UFD entry
+	  clr (r2)+		; not used (make sure it's zero)
+	  mov pc,dwtf(r5)	; set write flag
+	  push r5		; DRELB arg: block ptr
+	  jsr r5,drelb		; release the MFD
+	  pop *			; val: error code
+	  mov r3,r5		; get ptr to disk block (gotten by DALLOC)
+	  mov #<lblk/2>,r0	; get number of words/block
+	  mov r5,r2		; get ptr that can be incremented
+  loop <    clr (r2)+		; zero this location
+	    sorl r0		; done yet?
+	    >
+	  mov pc,dwtf(r5)	; set write flag
+	  push r5		; DRELB arg: block ptr
+	  jsr r5,drelb		; release the UFD
+	  pop r0		; vals: error code
+	  bne 4$
+	  rts pc		; done
+2$:	  sorl r0		; done with this block of the MFD yet?
+	  >
+	tst (r5)		; is there a next block?
+	if ne,<			; if so then get it and start again
+	  push r5		; DGNEXT arg: block ptr
+	  jsr r5,dgnext		; get next block
+	  pop r5,r0		; vals: ptr, error code
+	  bne 4$		; if error then go hack it
+	  >
+	else <			; otherwise we need to graft on a new block
+	  push diskno(r4)	; DALLOC args: disk number
+	  jsr r5,dalloc		; get us a new block to use
+	  pop r3,r0		; vals: block number,error code
+	  bne 3$		; if error then hack it
+	  mov dblk(r3),(r5)	; set link to new block
+	  mov pc,dwtf(r5)	; set write flag
+	  push r5		; DRELB arg: block ptr
+	  jsr r5,drelb		; release this block
+	  pop *			; val: error code
+	  bne 4$		; if error then go hack it
+	  mov r3,r2		; get ptr that can be inc
+	  mov #<lblk/2>,r0	; get number of words/block
+  loop <    clr (r2)+		; clear this location
+	    sorl r0		; done yet?
+	    >
+	  mov r3,r5		; reset ptr
+	  >
+	br 1$			; done now
+3$:	push r5			; DRELB arg: block ptr
+	jsr r5,drelb		; release this block
+	pop *			; val: error code
+4$:	jmp comerr		; report error
+
+
+
+; DELETE_DIRECTORY or DD command
+
+dd:	push filep(r4)		; FILARG arg: ptr to filename
+	call filarg		; read a filename
+	push diskno(r4),filnam(r4)	; DUICLK args:disk number, dir name
+	jsr r5,duiclk		; lookup directory
+	pop r5,r0		; vals: ptr, error code
+	bne 1$			; if error then stop and report it
+3$:	mov #<lblk-2>/lufde,r0	; get number of entries in this block
+	mov r5,r2		; get ptr that can be inc
+	tst (r2)+		; skip link block
+loop <    tst (r2)		; first part of filename 0?
+	  bne 2$		; no, error
+	  tst 2(r2)		; second part of filename 0?
+	  bne 2$		; no, error
+	  tst 4(r2)		; extension of filename 0?
+	  bne 2$		; no, error
+	  add #lufde,r2		; move to next entry
+	  sorl r0		; do it
+	  >
+	push r5			; DGNEXT arg: block ptr
+	jsr r5,dgnext		; get next block of UFD
+	pop r5,*		; vals: block ptr,error code
+	beq 3$			; if no error then process this block
+	push diskno(r4),#mfdb	; DGETB args:disk no.,block number
+	jsr r5,dgetb		; read in the MFD
+	pop r5,r0		; vals:ptr, error code
+	bne 1$			; error?
+5$:	mov r5,r2		; get ptr that can be inc
+	tst (r2)+		; skip link block
+	mov #<lblk-2>/10,r0	; get number of MFD entries
+  loop <  cmp (r2),filnam(r4)	; is rthis the right directory?
+	  if eq,<		; yes
+	    push diskno(r4),2(r2)	; DDF args: disk number, block number
+	    jsr r5,ddf		; delete the UFD
+	    pop r0		; val: error code
+	    bne 4$		; error ?
+	    clr (r2)+		; clear entry
+	    clr (r2)+		; clear entry
+	    clr (r2)+		; clear entry
+	    clr (r2)+		; clear entry
+	    mov pc,dwtf(r5)	; set write flag
+	    push r5		; DRELB arg: ptr
+	    jsr r5,drelb	; release this block
+	    pop r0		; val: error code
+	    bne 1$		; error?
+	    rts pc
+	    >
+	  add #10,r2		; move to next entry of MFD
+	  sorl r0		; done yet
+	  >
+	push r5			; DGNEXT arg: ptr
+	jsr r5,dgnext		; get next block of UFD
+	pop r5,*		; vals: ptr, error code
+	beq 5$			; no error?
+	rts pc
+
+4$:	push r5			; DRELB arg: ptr
+	jsr r5,drelb		; release this block
+	pop *			; val: error code
+1$:	jmp comerr
+2$:	type ^"Directory not empty
+"
+        rts pc
+.endc
+
+
+
+;PRINT command.
+print: push filep(r4)		; FILARG arg: ptr to filename buffer
+       call filarg  		; parse a file name
+       push pc			; ATTACH arg: device id
+       add #dskn-.,(sp)		; ....
+       push filep(r4)		; ATTACH arg: file name
+       push diskno(r4),#0	; ATTACH args:  disk unit #, cbits
+       call attach  		; open file
+       pop r2,r0  		; vals: channel id, error code
+       if ne,<
+         jmp comerr		; handler error opening file
+       >
+       push uoch(r4),r2		; XFRCHN args: output, input channel
+				; ids
+       call xfrchn		; transfer the characters
+1$:    push r2  		; DETACH arg: channel id
+       call detach  		; close file
+       rts pc
+
+
+.if ne  nlp
+; TPL command.
+tpl:   push filep(r4)		; FILARG arg: ptr to filename buffer
+       call filarg  		; parse a file name
+       push pc			; ATTACH arg: device id
+       add #dskn-.,(sp)	; ....
+       push filep(r4)		; ATTACH arg: file name
+       push diskno(r4),#0	; ATTACH args: disk unit #, cbits
+       call attach  		; open file
+       pop r2,r0  		; vals: channel id, error code
+       if ne,<
+         jmp comerr		; handle error opening file
+         >
+       jsr pc,gettpl		; attempt to get the TPL
+       pop r1,r0  		; vals: channel id, error code
+       if ne,<
+	 push r2		; DETACH arg: channel id
+	 call detach		; close file
+	 jmp comerr		; handle error attaching LPT
+	 >
+       push r1,r2		; XFRCHN args: output, input channel
+				; ids
+       call xfrchn		; transfer the characters
+1$:    push r2  		; DETACH arg: channel id
+       call detach  		; close file
+       push r1  		; DETACH arg: channel id
+       call detach  		; let go of LPT
+       rts pc
+
+; Tries to get the TPL and returns channel id and error code on the stack
+
+gettpl: push (sp),(sp)		; make room for return args
+				; be careful to keep lpt unit 0 for SAO kludge
+        push pc			; ATTACH arg: device id
+	add #lptn-.,(sp)	; ....
+	push #0,#0,#0		; ATTACH args: file name,unit #,cbits
+	call attach  		; get the LPT
+	pop 4(sp),4(sp)		; vals: channel id, error code
+	rts pc
+
+.if ne 0
+tplsys: rts pc			; broken somehow
+	jsr pc,gettpl		; attempt to get the TPL
+	pop r1,r0		; vals: channel id, error code
+	if ne,<
+	  jmp comerr		; report error
+	  >
+	push uoch(r4),r1	; save our output channel
+	mov r1,uoch(r4)		; make the TPL channel id our
+				; output channel
+	jsr pc,systat		; do a systat
+	push uoch(r4)		; DETACH arg: channel id
+	call detach		; release the TPL
+	pop uoch(r4)		;  restore output to the terminal
+	rts pc
+
+; send a LIST_DIRECTORY to the TPL
+
+tplld:	jsr pc,gettpl		; attempt to get the TPL
+	pop r1,r0		; vals: channel id, error code
+	if ne,<
+	  jmp comerr		; report error
+	  >
+	push uoch(r4)		; save our output channel
+	mov r1,uoch(r4)		; make the TPL channel id our
+				; output channel
+	jsr pc,ld		; do a list_directory
+	push uoch(r4)		; DETACH arg: channel id
+	call detach		; release the TPL
+	pop uoch(r4)		;  restore output to the terminal
+	rts pc
+
+; send a LIST_USERS to the TPL
+
+tpllu:	jsr pc,gettpl		; attempt to get the TPL
+	pop r1,r0		; vals: channel id, error code
+	if ne,<
+	  jmp comerr		; report error
+	  >
+	push uoch(r4)		; save our output channel
+	mov r1,uoch(r4)		; make the TPL channel id our
+				; output channel
+	jsr pc,lu		; do a list_users
+	push uoch(r4)		; DETACH arg: channel id
+	call detach		; release the TPL
+	pop uoch(r4)		;  restore output to the terminal
+	rts pc
+
+; send a LIST_ALL to the TPL
+tplla:	jsr pc,gettpl		; attempt to get the TPL
+	pop r1,r0		; vals: channel id, error code
+	if ne,<
+	  jmp comerr		; report error
+	  >
+	push uoch(r4)		; save our output channel
+	mov r1,uoch(r4)		; make the TPL channel id our
+				; output channel
+	jsr pc,lall		; do a list_all
+	push uoch(r4)		; DETACH arg: channel id
+	call detach		; release the TPL
+	pop uoch(r4)		;  restore output to the terminal
+	rts pc
+
+.endc	; ne 0
+
+; the FORM_FEED of (FF) command sends a form feed to the LPT
+
+frmfed:	jsr pc,gettpl		; get the TPL
+	pop r1,r0  		; vals: channel id, error code
+	if ne,<
+	  jmp comerr		; handle error attaching LPT
+	  >
+	push r1,#14		; WCHAR args: channel id, character
+	call wchar		; send a form feed
+	push r1  		; DETACH arg: channel id
+	call detach  		; let go of LPT
+	rts pc
+
+.endc	; ne nlp
+
+; DELETE_FILE_PARANOID or DFP command
+dfp:	push filep(r4)		; FILARG arg: ptr to filename buffer
+	call filarg		; get filename to be deleted
+	mov filep(r4),r1	; get pointer file name 
+	add #12,r1		; get ptr to 2nd filename buffer & skip dir
+	mov #131045,(r1)+	; copy save filename (%TEMP%.TMP)
+	mov #51734,(r1)+	; ....
+	mov #77430,(r1)+	; ....
+	sub #10,r1		; get back ptr to 2nd filename
+	push pc			; DELETE arg: device name
+	add #dskn-.,(sp)	; ....
+	push r1,diskno(r4)	; DELETE args: filename ptr, disk unit #
+	call delete		; delete the old temporary file
+	pop *			; VAL: error code (don't care what it was)
+	push pc			; RENAME arg: device name
+	add #dskn-.,(sp)	; ....
+	push filep(r4),r1	; RENAME args: old filename,new filename
+	push diskno(r4)		; RENAME arg: disk unit #
+	call rename		; rename file
+	pop r0
+	if ne,<
+	  jmp comerr		; must have been an error, this time
+	  >
+	rts pc
+
+; DELETE or DF command.
+df:	push filep(r4)		; FILARG arg: ptr to filename buffer
+	call filarg  		; parse file name
+	mov filep(r4),r1	; get pointer to filename
+	add #10,r1		; get end of filename
+	push -(r1),-(r1)	; IOAC args: extension, 2nd filename
+	push -(r1),-(r1)	; IOAC args: 1st filename, directory name
+ifMIT <
+.if eq  <sysdsk-drl>
+	push diskno(r4)		; get disk number
+	add #71176,(sp)		; add offset to get diskname (RL0)
+.endc
+.if eq  <sysdsk-drp>
+	push diskno(r4)		; get disk number
+	add #71436,(sp)		; add offset to get diskname (RP0)
+.endc
+      >
+ifSAO <
+	push diskno(r4)		; get disk number
+	add #72136,(sp)		; add offset to get diskname (RX0)
+      >
+	push uoch(r4)		; IOAC arg: channel id
+	call ioac		; print out message
+	.string ^"Do you want to delete ^r:^r;^r^r.^r ?"
+	push uoch(r4)		; RCHAR arg: channel id
+	call rchar		; get character
+	pop r0			; got it
+	push uoch(r4),r0	; WCHAR args: channel id,char
+	call wchar		; echo typed char
+	cmp r0,#'y		; was it a Y?
+	beq 1$			; yes
+	cmp r0,#'Y		; was it a Y?
+	bne 2$			; no
+1$:	push pc			; DELETE arg: device name
+	add #dskn-.,(sp)	; ....
+	push filep(r4)		; DELETE args: file name
+	push diskno(r4)		; DELETE args: disk unit #
+	call delete  		; delete the file
+	pop r0			; val: error code
+	if ne,<
+	  jmp comerr		; handle error deleting file
+	  >
+2$:	jsr pc,crlf		; output a CRLF
+	rts pc
+
+
+; RENAME command.
+ren:	call twofil		; read two filenames
+	push pc			; RENAME arg: device name
+	add #dskn-.,(sp)	; ...
+	push r1,r2		; RENAME args: old, new
+	push diskn1(r4)		; RENAME arg: disk unit id
+	call rename  		; rename file
+	mov diskn1(r4),diskno(r4)	; change disk number back(in
+				; case the luser tried to change it)!!
+	pop r0 			; val: error code
+	if ne,<
+	  jmp comerr		; handle error renaming file
+	  >
+	rts pc
+
+
+; MOVE command.
+move:	mov pc,r3		; set flag saying to delete after copy
+	br copy1
+
+; COPY command.
+copy:	clr r3			; clear flag saying to delete after copy
+copy1:	call twofil		; read two filenames
+	push pc			; ATTACH arg: device name
+	add #dskn-.,(sp)	; ...
+	push r1,diskn1(r4),#0	; ATTACH args: filename,unit #,cbits
+	call attach		; open first file for reading
+	pop r1,r0		; vals: channel id, error code
+	if ne,<
+	  jmp comerr		; handle error opening first file
+	  >
+	push pc			; ATTACH arg: device name
+	add #dskn-.,(sp)	; ...
+	push r2,diskno(r4)	; ATTACH arg: file name,disk unit #
+	push #%icrea+%iupd	; ATTACH args: cbits
+	call attach		; open second file for writing
+	pop r2,r0		; vals: channel id, error code
+	if ne,<
+	  push r1		; DETACH arg: channel id
+	  call detach		; close first file
+	  jmp comerr
+	  >
+	push r2,r1		; XFRCHN args: output, input channel
+				; ids
+        call xfrchn		; transfer the file
+	push r1  		; DETACH arg: channel id
+	call detach  		; close first file
+	push r2  		; DETACH arg: channel id
+	call detach  		; close second file
+	tst r3			; delete first file after copy?
+	if ne,<
+	  push pc		; DELETE arg: device name
+	  add #dskn-.,(sp)	; ...
+	  push filep(r4)	; DELETE arg: filename
+	  add #10,(sp)		; ...
+	  push diskn1(r4)	; DELETE arg: disk unit number
+	  call delete		; delete first file after copy for MOVE
+	  pop r0		; val: error code
+	  if ne,<
+	    jmp comerr		; go handle error deleting
+	    >
+	  >
+	rts pc
+
+
+; TWOFIL reads two filename arguments.  This is a hack so RENAME, COPY, and
+; MOVE share this code.  R1 points to the first filename and R2 to the second.
+twofil:	mov filep(r4),r2  	; get ptr to FILNAM
+	push r2			; FILARG arg: ptr to filename buffer
+	call filarg		; get a filename argument
+	mov r2,r1		; copy ptr to FILNAM
+	mov (r1)+,6(r1)  	; copy old file name
+	mov (r1)+,6(r1)  	; ...
+	mov (r1)+,6(r1)  	; ...
+	mov (r1)+,6(r1)  	; ...
+	mov diskno(r4),diskn1(r4)	; save disk unit number
+	call arg		; skip over spaces
+	pop r0			; val: character
+	if eq,<
+	  pop *			; remove return R5 from stack so can JMP away
+	  jmp eeam
+	  >
+	push r2			; FILARG arg: ptr to filename buffer
+	call filarg		; read another filename argument
+	return
+
+; This goes through and lists process information
+
+procpr:	jsr pc,systat		; print out a systat
+	push uoch(r4)		; IOAC arg: channel id
+	call ioac		; print out message
+	.string  ^"
+TTY #   Channel ID     Process ID    Process RQT
+"
+        clr r0			; start with number 0
+	mov pc,r1		; get pointer to TTYCH
+	add #ttych-.,r1		; ....
+loop <    push prqtb-ttych(r1)	; IOAC arg: Process request
+	  push pidtb-ttych(r1)	; IOAC arg: Process id
+	  push (r1)+		; IOAC arg: channel id for this tty
+	  push r0		; IOAC arg: TTY number
+	  push uoch(r4)		; IOAC arg: channel id
+	  call ioac
+	  .string ^"  ^d       ^5o           ^d           ^d
+"
+          inc r0		; move to next tty
+	  cmp r0,#ntty		; done all yet??
+	  rptl lo
+	  >
+	rts pc
+
+
+; The LIST_MEMORY prints out the process using that piece
+; or tells that it's free and gives its size for either condition
+
+memlst: mov fslo,r0		; get ptr to beginning of free storage
+	push uoch(r4)		; IOAC arg: channel id
+	call ioac		; print out message
+	  .string ^"Free Storage Area Usage:
+"
+loop <	  push (r0)		; IOAC arg: number of words in this block
+	  bic #100000,(sp)	; make sure "used" bit is off
+	  push r0		; IOAC arg: block start address
+	  push uoch(r4)		; IOAC arg: channel id
+	  call ioac		; print out message
+	    .string ^"Block start: ^6O   Number of Words: ^6O   "
+          tst (r0)		; is this part of memory in use??
+	  if mi,<		; yes
+	    mov r0,r2		; copy address
+	    mov (r0),r1		; get number of words in block
+	    asl r1		; make it a byte count
+	    add r1,r2		; get ptr to process id that has this block
+	    sub #4,r2		; ....
+	    push (r2)		; IOAC arg: process id
+	    push uoch(r4)	; IOAC arg: channel id
+	    call ioac		; print it out
+	      .string ^"In use by Process ^5d
+"
+            >
+	  else <
+	    push uoch(r4)	; IOAC arg: channel id
+	    call ioac		; print it out
+	      .string ^"Block Free
+"
+            >
+	  mov (r0),r1		; get number of words in block
+	  asl r1		; make byte count
+	  add r1,r0		; move to next address
+	  cmp r0,fshi		; done yet??
+	  exitl his
+	  rptl
+	  >
+	rts pc			; done
+
+.sbttl	Special purpose commands
+
+.if ne  asmtek
+
+; TEKSEND command.  sends a file to the plotter. ^L seperates
+; pages of text.
+
+.if ne 0
+teksnd:	push filep(r4)		; FILARG arg: ptr to filename buffer
+	call filarg  		; pick up file name arg
+	push pc			; ATTACH arg: device name
+	add #dskn-.,(sp)	; ....
+	push filep(r4)		; ATTACH arg: file
+	push diskno(r4),#0	; ATTACH args: unit #,cbits
+	call attach  		; open file
+	pop r3,r0  		; vals: channel id, error code
+	if ne,<
+	  jmp comerr		; handle error opening file
+	  >
+	mov #1,r5		; r5 contains the page number in the file
+	call tekbeg		; set up the plotter
+	pop r0			; VALS: error code
+	if ne,<
+	  push r3		; DETACH arg: channel id
+	  call detach		; release the file
+	  jmp comerr		; report error
+	  >
+loop  <  call quit		; see if user wants to quit
+	 pop *			; VAL: non-zero if we ae to quit
+	 bne 3$			; quit this command and cleanup
+	 push r3		; RCHAR arg: channel id
+	 call rchar		; get character
+	 pop r0			; ....
+	 bmi 3$			; if minus then EOF
+	 cmp r0,#14		; check for start of page
+	 rptl ne		; not yet
+2$:	 push r5,uoch(r4)	; IOAC args: page number, channel id
+	 call ioac		; print message
+	   .string ^"Print page #^d ?"
+	 push uoch(r4)		; RCHAR arg: channel id
+	 call rchar		; read a character
+	 pop r0			; got it
+	 push uoch(r4),r0	; WCHAR args: channel id, character
+	 call wchar		; echo the character
+	 jsr pc,crlf		; print a CR
+	 cmp r0,#'Y		; print plot?
+	 exitl eq		; yes!!!
+	 cmp r0,#'y		; print plot ?
+	 rptl ne		; no!!!
+	 exitl
+	 >
+       call teksb		; send any stuff remaining in buffer
+       push #teklno		; ALWRIZ arg: line no.
+       call alwriz		; send Plotter On,move to Home position
+         .string ^"AE"
+loop  <  push r3		; RCHAR arg: channel id
+	 call rchar		; get next character
+	 pop r0			; got it.
+	 bmi 3$			; if minus then EOF
+	 cmp r0,#14		; is this a break in the page?
+	 exitl eq		; yes!!!
+	 push r0		; TEKASC arg: character
+	 call tekasc		; output character to the plotter
+	 rptl			; do next character
+	 >
+       inc r5			; increment the page number
+       br 2$			; start the next page
+3$:    call tekend		; end plotting...
+       push r3			; DETACH arg: channel id
+       call detach		; relesase the file
+       rts pc
+.endc
+
+; TEKPLOT command.
+tekplt:	push filep(r4)		; FILARG arg: ptr to filename buffer
+	call filarg  		; pick up file name arg
+	push pc			; ATTACH arg: device name
+	add #dskn-.,(sp)	; ....
+	push filep(r4)		; ATTACH arg: file name
+	push diskno(r4),#0	; ATTACH args: unit #,cbits
+	call attach  		; open file
+	pop r3,r0  		; vals: channel id, error code
+	if ne,<
+	  jmp comerr		; handle error opening file
+	  >
+	 clr r5			; r5 contains the plot number in the file
+tkplt1:	mov #pltstr,r1  	; ptr to string to search for
+	clr r2  		; no. of characters which match so far
+loop <    call quit		; see if user wants to quit
+	  pop *			; VAL: non-zero if we are to quit
+	  bne tpen3		; quit this command and cleanup
+	  push r3  		; RCHAR arg: channel id
+	  call rchar  		; read character from plot file
+	  pop r0  		; val: character
+	  bmi tpen3  		; end of file
+	  cmpb r0,(r1)  	; this the next character of the plot string?
+	  if ne,<
+	    sub r2,r1  		; no, backup ptr
+	    clr r2  		; and reset count
+	    rptl
+	    >
+	  inc r1  		; advance ptr
+	  inc r2  		; and count
+	  tstb (r1)  		; reached end of plot string?
+	  rptl ne  		; no, keep going
+	  >
+	inc r5			; increment the plot number
+	clr tekerr		; no error yet
+	push r5,uoch(r4)	; IOAC args: plot number, channel id
+	call ioac		; print message
+	.string ^"Print plot #^d ?"
+	push uoch(r4)		; RCHAR arg: channel id
+	call rchar		; read a character
+	pop r0			; got it
+	push uoch(r4),r0	; WCHAR args: channel id, character
+	call wchar		; echo the character
+	jsr pc,crlf		; print a CR
+	cmp r0,#'Y		; print plot?
+	beq 1$			; yes
+	cmp r0,#'y		; print plot ?
+	bne tkplt1		; see if more plots in this file
+1$:	call tekbeg		; setup for plotting
+	pop r0			; VALS: error code
+	if ne,<
+	  push r3		; DETACH arg: channel id
+	  call detach		; release the file
+	  jmp comerr		; report error
+	  >
+
+tploop:	call quit		; see if user wants to quit
+	pop *			; VAL: non-zero if we are to quit
+	beq 1$			; quit this command and cleanup
+	call tekend		; finished plotting
+	br tpen3		; and exit
+1$:	tst tekerr		; was there an error on last block sent
+	if ne,<			; yes
+	   push uoch(r4)	; IOAC arg: output channel
+	   call ioac		; print out error on users terminal
+	   .string ^"Plotter Error
+"
+           clr tekerr		; no error now
+           br tpen1		; finished with plot if error has happened
+	   >
+	jsr pc,tpgetc		; get next plot character
+	  br tpen1		; end of plot
+	mov r0,-(sp)		; copy character so can mung it
+	bic #3,(sp)		; clear low two bits (op code is bits 2-5)
+	asr (sp)		; divide by two for dispatch
+	cmp (sp),#10
+	if hi,<
+	  pop *			; remove bad value from stack
+	  err ^"Bad plot file."
+	  br tpen1
+	  >
+	add (sp)+,pc		; dispatch on opcode
+	  br tplm		; Long Move
+	  br tpld		; Long Draw
+	  br tpsm		; Short Move
+	  br tpsd		; Short Draw
+	  br tpac		; ASCII char
+
+tpen3:	br tpen2		; this is here for branch range
+
+; Long Move
+tplm:	jsr pc,tpg2  		; get long y coordinate
+	mov r0,lsty		; save last y coordinate
+	push r0			; TEKMOV arg1: y
+	jsr pc,tpg2		; get long x coordinate
+	mov r0,lstx		; save last x coordinate
+	push r0			; TEKMOV arg2: x
+	call tekmov		; move to x,y
+	br tploop
+
+; Long Draw
+tpld:	jsr pc,tpg2		; get long y coordinate
+	mov r0,lsty		; save last y coordinate
+	push r0			; TEKDRW arg1: y
+	jsr pc,tpg2		; get long x coordinate
+	mov r0,lstx		; save last x coordinate
+	push r0			; TEKMOV arg2: x
+	call tekdrw		; draw vector to x,y
+	br tploop
+
+; Short Move
+tpsm:	mov r0,r2		; save op code since it has sign bits
+	jsr pc,tpgetc		; read relative y
+	  br tpen1
+	bit #2,r2		; check op code, is y supposed to be negative?
+	if ne,<
+	  neg r0		; yes, negate value we've got
+	  >
+	add r0,lsty		; add to last y value
+	jsr pc,tpgetc		; read relative x
+	  br tpen1
+	bit #1,r2		; check op code, is x supposed to be negative?
+	if ne,<
+	  neg r0		; yes, negate value we've got
+	  >
+	add r0,lstx		; add to last x value
+	push lsty,lstx		; TEKMOV args: y, x
+	call tekmov		; move to specified location
+	br tploop
+
+; Short Draw
+tpsd:	mov r0,r2		; save op code since it has sign bits
+	jsr pc,tpgetc		; read relative y
+	  br tpen1
+	bit #2,r2		; check op code, is y supposed to be negative?
+	if ne,<
+	  neg r0		; yes, negate value we've got
+	  >
+	add r0,lsty		; add to last y coordinate
+	jsr pc,tpgetc		; read relative x
+	  br tpen1
+	bit #1,r2		; check op code, is x supposed to be negative?
+	if ne,<
+	  neg r0		; yes, negate value we've got
+	  >
+	add r0,lstx		; add to last x coordinate
+	push lsty,lstx		; TEKDRW args: y, x
+	call tekdrw		; draw a vector to specified location
+	br tploop
+
+; ASCII char
+tpac:	bic #177776,r0		; get low bit of op code which is bit 7 of char
+	swab r0			; shift to bit 7
+	asr r0			; ...
+	push r0			; push partially formed arg to TEKASC
+	jsr pc,tpgetc		; read low 6 bits of character
+	  br tpen1
+	add r0,(sp)		; add low 6 bits into word with bit 7
+	call tekasc		; draw character
+	jmp tploop
+
+tpen1: 	call tekend		; terminate plotting
+	jmp tkplt1		; go do rest of plot file
+tpen2:	push r3  		; DETACH arg: channel id
+	call detach  		; close plot file
+	rts pc
+
+tekerr:	.word 0
+pltstr:	.asciz "TEK4662 PLOT DATA:"
+	.even
+
+
+; Read two 6 bit data bytes from plot file and form into 12 bit number.
+tpg2:	jsr pc,tpgetc  		; get next char
+	  br 1$
+	swab r0  		; shift right 6 places
+	ash #-2,r0  		; ...
+	mov r0,r1  		; copy
+	jsr pc,tpgetc  		; get next char
+	  br 1$
+	add r1,r0  		; add to previous to get 12 bit value
+1$:	rts pc
+
+; Get 6 bits of data from plot file.
+tpgetc:	push r3  		; RCHAR arg: channel id
+	call rchar  		; get next character from file
+	pop r0  		; val: character
+	bmi 1$  		; end of file?
+	cmp r0,#';		; semicolon gobbles next char
+	if eq,<
+	  push r3		; RCHAR arg: channel id
+	  call rchar		; get next character from file
+	  pop r0		; val: character
+	  bmi 1$		; end of file?
+	  add pc,r0  		; yes, find correct value from table
+	  movb lpct-.-100(r0),r0 ; ...
+	  bmi 1$  		; ;C ends plot
+	  >
+	else <
+	  sub #40,r0  		; make into values 0-77
+	  blos tpgetc  		; ignore space and ctrl chars
+	  cmp r0,#'/-40
+	  if eq,<
+	    clr r0
+	    >
+	  >
+	add #2,(sp)  		; return2
+1$:	rts pc
+
+lstx:	.blkw 1			; last X value
+lsty:	.blkw 1			; last Y value
+
+.endc	; ne asmtek
+
+.sbttl	Command processor subroutines
+
+quit:	push (sp)		; make room for return value
+	push uich(r4)		; ORDER arg: channel id
+	push #10000+tbreak,#0	; ORDER arg: order code, order arg
+	call order		; get tbreak word to see if a break
+				; was typed
+        mov (sp)+,2(sp)		; copy val into return slot and remove
+				; from stack
+	if ne,<			; non-zero means break key was struck
+	  push uich(r4)		; ORDER arg: channel id
+	  push #20000+tbreak,#0	; ORDER arg: order code, order arg
+	  call order		; set tbreak back to zero
+	  pop *
+	  push uoch(r4)		; IOAC arg: channel id
+	  call ioac		; tell user a break occurred
+	    .string ^"
+Command interrupted (QUIT)
+"
+          >
+	return
+
+crlf:   push uoch(r4)		; IOAC arg: channel id
+	call ioac		; print CR & LF
+	.string ^"
+"
+        rts pc
+
+
+; XFRCHN transfers characters from the read channel to the write
+; channel and returns when a -1 is read from the read channel.  If a
+; break is encountered then the operation is aborted and a return is
+; performed. 
+	
+xfrchn:	push r0			; save register
+loop   <  call quit		; see if user wants to quit
+	  pop *			; val: non-zero if break typed
+	  exitl ne		; ....
+	  push 4(sp)		; RCHAR arg: input channel
+	  call rchar		; get next character
+	  pop r0		; got character
+	  exitl mi		; -1 returned for eof
+	  push 6(sp),r0		; WCHAR args: output channel,character
+				; to send
+	  call wchar		; send character
+	  rptl			; loop until finished reading
+	  >
+	pop r0			; restore register
+	pop (sp),(sp)		; remove args
+	return
+
+
+; RDCMDL reads a command into the command buffer.
+
+;	ARGS:				VALS:
+; R4:	ptr to cs			(none)
+
+rdcmdl:	push r0,r1  		; save regs
+	mov r4,cbufp(r4)  	; set ptr to current position in command buf
+	add #cbuf,cbufp(r4)	; ...
+	push uich(r4),uoch(r4)		; READL args: input ch, output ch
+	push cbsize(r4),cbufp(r4)	; READL args: buffer size
+	call readl		; read an input line into the command buffer
+	pop r0			; val: no. of characters read
+	mov cbufp(r4),cendp(r4)	; ptr to end of buffer
+	add r0,cendp(r4)	; ...
+	pop r1,r0 		; restore regs
+	return
+
+
+; RDCMDC reads the next character from the command line.
+
+;	ARGS:				VALS:
+; R4:	ptr to cs		 SP ->	character
+
+rdcmdc:	push (sp)		; make return value slot
+	clr 2(sp)		; start off with null return character
+	cmp cbufp(r4),cendp(r4)	; reached end of command yet?
+	if lo,<			; no
+	  movb @cbufp(r4),2(sp)	; get character from buffer
+	  >
+	inc cbufp(r4)		; increment buffer ptr
+	return
+
+
+; RRCMDC backs up CBUFP so that the previous character from the command
+; line will be reread by the next RCMDC.
+
+;	ARGS:				VALS:
+; R4:	ptr to cs			(none)
+
+rrcmdc:	dec cbufp(r4)		; backup buffer ptr to last character read
+	return
+
+
+; ARG skips over whitespace in the command line.  The next character read
+; is guarenteed not to be whitespace.
+
+;	ARGS:				VALS:
+; R4:	ptr to cs		 SP ->	character
+
+arg:	push (sp),r0		; make return value slot, save reg 
+loop <	  call rdcmdc  		; get character
+	  pop r0		; val: character
+	  cmp r0,#11  		; TAB?
+	  rptl eq
+	  cmp r0,#40  		; SP?
+	  rptl eq
+	  >
+	call rrcmdc  		; reread first char of arg
+	mov r0,4(sp)		; return terminating character
+	pop r0			; restore reg
+	return
+
+
+; SARG
+
+;	ARGS:				VALS:
+; R4:	cs ptr			 SP ->	length
+;					ptr
+
+sarg:	push (sp),(sp),r0	; make two return value slots, save reg
+	mov cbufp(r4),6(sp)	; return current ptr
+	clr 4(sp)		; start off length at zero
+loop <	  call rdcmdc		; read character from command line
+	  pop r0		; val: character
+	  exitl eq		; exit if reached end of command line
+	  cmp r0,#40		; or if reached end of string (i.e. found
+	  exitl eq		; a space)
+	  inc 4(sp)		; increment length
+	  rptl
+	  >
+	call rrcmdc		; reread character which terminated name
+	pop r0			; restore reg
+	return
+
+
+; OCTARG will return the value of a octal argument on the stack.
+; Null arg implies default to 1.
+
+;	ARGS:				VALS:
+; R4:	cs ptr			 SP ->	no.
+
+octarg:	push (sp)		; make slot for return value
+	jsr r5,save6  		; save regs
+	mov #8.,r5  		; set radix for octal input
+	br ncomn
+
+
+; NUMARG will return the value of a decimal argument on the stack.
+; Null arg implies default to 1.
+
+;	ARGS:				VALS:
+; SP ->	cs ptr			 SP ->	no.
+
+numarg:	push (sp)		; make slot for return value
+	jsr r5,save6  		; save regs
+	mov #10.,r5  		; set radix for decimal input
+
+ncomn:	call arg  		; ignore leading spaces
+	pop *			; val: character
+	clr r1  		; holds no.
+	mov #1,r2  		; default arg if nothing specified
+loop <	  call rdcmdc		; read command character
+	  pop r0		; val: character
+	  cmp r0,#'0  		; digit?
+	  exitl lo
+	  cmp r0,#'9
+	  exitl hi
+	  sub #'0,r0
+	  mul r5,r1
+	  add r0,r1
+	  mov r1,r2  		; a no. was specified, clobber default
+	  rptl
+	  >
+	call rrcmdc  		; reread the terminating character
+	mov r2,16(sp)  		; and put no. in return value slot
+	jsr r5,rest6  		; restore regs
+	return
+
+
+; CVR50
+
+;	ARGS:				VALS:
+; R4:	cs ptr			 SP ->	rad50 word 2
+;					rad50 word 1
+
+cvr50:	push (sp),(sp)		; make slots for two return values
+	jsr r5,save6  		; save regs
+	clr r3
+	jsr r5,cvr1  		; read three chars and pack into rad50 word
+	jsr r5,cvr1
+	jsr r5,cvr1
+	mov r3,20(sp)		; return rad50 word 1
+	clr r3
+	jsr r5,cvr1  		; three more chars and pack
+	jsr r5,cvr1
+	jsr r5,cvr1
+	mov r3,16(sp)		; return rad50 word 2
+loop <	  clr r3
+	  jsr r5,cvr1  		; read characters until non-rad50 char
+	  tst r3
+	  rptl ne
+	  >
+	jsr r5,rest6  		; restore regs
+	return
+
+cvr1:	mul #50,r3  		; shove over chars in so far
+	call rdcmdc  		; get character
+	pop r0			; val: character
+	cmp r0,#40		; don't treat " " or "." as rad50 on input
+	beq 2$
+	cmp r0,#'.  		; ...
+	beq 2$
+	cmp r0,#'		; but if ^Q then quote next character
+	if eq,<
+	  call rdcmdc
+	  pop r0
+	  >
+	cmp r0,#'a		; lower case?
+	blo 1$
+	cmp r0,#'z
+	bhi 1$
+	bic #40,r0		; convert to upper case
+1$:	mov pc,r1		; ptr to rad50 to ascii convertion table
+	add #r50asc-.,r1	; ...
+	mov #50,r2  		; size of table
+loop <	  cmpb (r1)+,r0  	; this the character?
+	  exitl eq
+	  sorl r2
+2$:	  call rrcmdc		; not a rad50 character, leave to be reread
+	  return
+	  >
+	sub pc,r1		; subtract address of table to get offset
+	sub #r50asc+1-.,r1	; (which is rad50 character code)
+	add r1,r3		; add to word we're accumulating
+	return
+
+
+; FILARG reads a filename argument from the command line.
+
+;	ARGS:				VALS:
+; SP ->	filename ptr			(none)
+; R4:	cs ptr
+
+filarg:	jsr r5,save6		; save regs
+	mov 16(sp),r3		; ptr to filename buffer
+	call arg  		; ignore spaces before arg
+	pop *			; val: character
+loop <	  call cvr50	  	; read rad50 name
+	  pop r2,r1		; vals: rad50 word 2, rad50 word 1
+	  call rdcmdc		; get terminating character
+	  pop r0		; val: character
+	  cmp r0,#';		; semicolon?
+	  if eq,<
+	    mov r1,(r3)		; set directory name
+	    rptl
+	    >
+	  cmp r0,#':		; colon:??
+	  if eq,<
+ifSAO <    sub #72136,r1	; make disk unit number (RX0=71236)
+      >
+ifMIT <
+.if eq  <sysdsk-drl>
+	  sub #71176,r1		; make disk unit number (RL0=71176)
+.endc
+.if eq  <sysdsk-drp>
+	  sub #71436,r1		; make disk unit number (RP0=71436)
+.endc
+>
+	    if eq,<		; was it disk 0
+	      clr diskno(r4)	; yes
+	      >
+	    dec r1		; check for disk 1
+	    if eq,<
+	      mov #1,diskno(r4)	; yes it was
+	      >
+	    rptl
+	    >
+	  call rrcmdc		; reread terminator
+	  >
+	tst r1  		; any rad50 accumulated?
+	if ne,<
+	  mov r1,2(r3)		; yes, set the filename
+	  mov r2,4(r3)
+	  >
+	cmp r0,#'.  		; is rad50 terminator "."?
+	if eq,<
+	  call rdcmdc		; read the "."
+	  pop *			; val: character
+	  call cvr50		; read more rad50
+	  pop *,6(r3)		; vals: word 2, word 1 (set the extension)
+	  >
+	jsr r5,rest6		; restore regs
+	pop (sp)		; remove arg from stack
+	return
+
+; SCASE
+
+;	ARGS:				VALS:
+; SP ->	ptr to command list	 SP ->	ptr to entry
+;	length				error code
+;	ptr to string
+
+scase:	jsr r5,save6		; save regs
+	mov 16(sp),r5		; ptr to list of strings
+	tst (r5)+		; skip over 1st word (entry size)
+loop <	  mov (r5),r1		; ptr to asciz string from list
+	  if eq,<
+	    mov #-1,22(sp)	; return error indication
+	    exitl
+	    >
+	  mov 22(sp),r3		; ptr to string to lookup
+	  mov 20(sp),r2		; length of string
+1$:	  movb (r3)+,r4		; get next character of string and inc
+	  tstb (r1)		; string from list exhausted?
+	  beq 2$		; if no next character then exit
+	  cmpb r4,#'A		; if the next character is a capital we
+	  blo 4$                ; want to lowercase it for comparison
+	  cmpb r4,#'Z
+	  bhi 4$                ; not uppercase at all	
+	  bisb #40,r4		; convert to lowercase for comparison
+4$:	  cmpb (r1)+,r4		; bytes the same in both strings?
+	  bne 2$		; no
+	  sob r2,1$		; keep going until passed string exhausted
+	  tstb (r1)		; if the string from list isn't done too
+	  bne 2$		; then no match
+	  mov r5,20(sp)		; return ptr to entry
+	  clr 22(sp)		; and a zero error code
+	  exitl
+2$:	  add @16(sp),r5	; add entry size to list ptr
+	  rptl
+	  >
+	jsr r5,rest6		; restore regs
+	pop (sp)		; remove one slot from stack
+	return

@@ -1,0 +1,516 @@
+; -*-PALX-*-
+
+; Versatec Electrostatic Printer/Plotter DIM
+
+
+.lif ne  asmplt
+nvpts==1024.			; no. of points on a plot line
+				; Note: changing nvpts requires rewriting
+
+
+; Calls to LPT DIM dispatch through this table:
+lpt:	defdim latt,ldet,lorder,lno,lwrite,lno,lno,lno
+
+
+; LPT DIM initialization: make LPT available.
+lpinit:				; nothing to do but fall through
+
+lppwru:	call catchn		; catch NXM traps
+	  1$-.
+	clr lpbusy		; make LPT unavailable
+	tst @#lps		; LPT there?
+	mov #-1,lpbusy		; make LPT available
+1$:	return
+lpbusy:	.word 0			; -1 if LPT not in use
+
+
+; LPT data block.  The DIM data word passed in R4 is a ptr to this
+; structure.  It is created at attach time, destroyed by detaching.
+dsect <
+lhpos::	 .word 0		; horizontal printer position
+lvpos::	 .word 0		; vertical printer position
+lbuf::	 .blkb 132.		; printer buffer
+.if ne  asmplt
+lplmp::	 .word 0		; ptr to plot message to match
+lplmc::	 .word 0		; count of matching characters
+lsemfl:: .word 0		; semicolon flag
+vpc::	 .word 0		; plot co-routine PC
+vr1::	 .word 0		; plot co-routine R1
+vvpos::	 .word 0		; vertical plotter position
+vlasty:: .word 0		; previous y1 value, this is for checking data.
+vfree::	 .word 0		; plot block freelist
+vlist::	 .word 0		; ptr to first plot block in list
+vlstb::	 .word 0		; ptr to last plot block processed
+.lif ne  asmspp
+spplin:: .word 0		; counter used to determine when to spp
+vbuf::	 .blkb nvpts/8.		; plotter buffer
+.endc
+	>,ltbll
+
+; LPT attach entry point.
+latt:	inc lpbusy		; LPT already being use?
+	if ne,<
+	  dec lpbusy		; compensate for INC
+	  mov #%enadv,r0	; being used, give device not available error
+	  return
+	  >
+	push #ltbll/2,#2*60.	; ALOCW args: size, timeout
+	call alocw		; get LPT data block
+	pop r4,r0		; vals: ptr, error code
+	bne 1$			; couldn't get memory
+.if ne  asmplt
+	mov pc,-(sp)		; start LPLMP at LPLMSG
+	add #lplmsg-.,(sp)	; ...
+	mov (sp)+,lplmp(r4)	; ...
+.endc
+	clr r0			; attach successful, zero error code
+	clr lvpos(r4)		; started at line no. 0
+1$:	return
+
+; LPT detach entry
+ldet:   tst lvpos(r4)		; on line 0??
+	if ne,<
+	  movb #14,@#lpb	; send a FF to print line and advance
+	  >
+	push r4			; FREE arg: ptr to block
+	call free		; free LPT data block
+	dec lpbusy		; set LPBUSY to -1 to indicate free
+	return
+
+
+; LPT read, delete, and rename entries
+lno:	lose %ebdio		; LPT can't read, delete or rename
+
+
+; LPT order entry
+lorder:	cmp r3,#1		; Status request?
+	if eq,<
+	  clr r0		; return zero unless LPT hung
+	  tst @#lps		; how's LPT feeling?
+	  if mi,<
+	    mov #%ehgdv,r0	; bad, very bad.  return device hung
+	    >
+	  return
+	  >
+	lose %ebdoc		; Bad order code
+	return
+
+
+; LPT write entry
+lwrite:	mov r4,r3		; ptr to printer buffer
+	add #lbuf,r3		; ...
+.if ne  asmplt
+	tst vpc(r4)		; plotting?
+	if ne,<
+	  jmp lplot		; yes, handle incoming data specially
+	  >
+	cmpb r0,@lplmp(r4)	; this part of the plot message?
+	if eq,<
+	  inc lplmp(r4)		; move to next character of message
+	  tstb @lplmp(r4)	; end of message?
+	  beq lvgo		; yes, start plotting
+	  inc lplmc(r4)		; no, indicate how far match goes
+	  >
+	else <
+	  sub lplmc(r4),lplmp(r4)	; doesn't match, restart ptr
+	  clr lplmc(r4)			; and count
+	  >
+.endc
+	cmpb r0,#11		; TAB?
+	if eq,<
+	  add #10,lhpos(r4)	; move to next multiple of 8
+	  bic #7,lhpos(r4)	; ...
+	  return
+	  >
+	cmpb r0,#12		; LF?
+	if eq,<
+	  jsr r5,lpout		; print the line
+	  movb r0,@#lpb		; send the LF to print the line
+	  inc lvpos(r4)		; update line no.
+	  return
+	  >
+	cmpb r0,#14		; FF?
+	if eq,<
+	  jsr r5,lpout		; output line
+	  jsr r5,lprdy		; wait for LPT to be ready
+	  movb r0,@#lpb		; send the FF to print line and advance
+	  clr lvpos(r4)		; clear vertical position
+	  clr lhpos(r4)		; clear horizontal position
+	  return
+	  >
+	cmpb r0,#15		; CR?
+	if eq,<
+	  clr lhpos(r4)		; clear column no.
+	  return
+	  >
+	add lhpos(r4),r3	; get ptr into buffer
+	cmpb r0,#40		; spaces don't overwrite, just advance
+	if ne,<
+	  cmp lhpos(r4),#132.	; beyond last print position?
+	  if lo,<
+	    movb r0,(r3)	; no, put character in buffer
+	    >
+	  >
+	inc lhpos(r4)		; advance one print position
+	return
+
+lplmsg:	.asciz "*/-+"		; message to look for on incoming data,
+	.even			; plotting data follows directly after
+
+lpout:	push r1,r2,r3		; save regs
+	mov #lps,r1		; printer status reg
+	mov r4,r2		; ptr to printer buffer
+	add #lbuf,r2		; ...
+	mov #132.,r3		; character count
+	jsr r5,lprdy		; wait for LPT ready
+loop <	  tstb (r1)		; wait for ready
+	  rptl pl		; ...
+	  movb (r2),2(r1)	; output byte to LPT
+	  movb #40,(r2)+	; clear buffer as we go
+	  sorl r3		; exactly 132 characters
+	  >
+	pop r3,r2,r1		; restore regs
+	rts r5
+
+
+lprdy:	push #lps,#100200	; TWONBN args: address, bit mask
+	call twonbn		; wait for ready bit in printer status reg
+	tst @#lps		; error condition?
+	if mi,<
+;	  lose %ehgdv		; error, bomb out
+;	  br lprdy		; continued, check again
+	  call sysmsg
+	    .string ^"LPT hung
+"
+	  push #lps,#100000	; TWONBE args: address, bit mask
+	  call twonbe		; wait for error bit in printer status reg
+	  >
+	rts r5
+
+.sbttl	Plot setup
+
+.if ne  asmplt
+; The following portion of the LPT DIM passes incoming plot
+; data to the plot co-routine.  The incoming characters are
+; converted to 6 bit no.s before being passed to the plot
+; co-routine.
+
+lvgo:	sub #4,lplmp(r4)	; correct plot message ptr
+	clr lplmc(r4)		; and count
+	jsr r5,lprdy		; wait for LPT ready
+	movb #14,@#lpb		; FF so plot starts on new page
+	jsr pc,vgo		; call plot co-routine
+	pop vpc(r4)		; save co-routine PC
+	rts r5
+
+lplot:	tst lsemfl(r4)		; last character a ";"?
+	if ne,<
+	  clr lsemfl(r4)	; clear the semicolon flag
+	  add pc,r0		; yes, find correct value from table
+	  movb lpct-.-100(r0),r0 ; ...
+	  >
+	else <
+	  cmp r0,#';		; semicolon gobbles next character
+	  if eq,<
+	    mov pc,lsemfl(r4)	; indicate need another character
+	    return
+	    >
+	  sub #40,r0		; make into values 0-77
+	  blos 1$		; ignore space and ctrl characters
+	  cmp r0,#'/-40
+	  if eq,<
+	    clr r0
+	    >
+	  >
+	mov vr1(r4),r1		; restore reg used by plot co-routine
+	jsr pc,@vpc(r4)		; call handler as co-routine
+	pop vpc(r4)		; save co-routine PC
+	mov r1,vr1(r4)		; save reg used by plot co-routine
+1$:	return
+
+lpct:	.byte 33,20,17,377,6	; table of ";" escape equivilants
+	.even
+
+.sbttl	Plot Co-routine
+
+; The plot co-routine takes incoming 6 bit plot data characters
+; and fills plot blocks with vector calls.  The vector calls
+; are stored in a list (VLIST) which is scanned to plot each
+; line on the Versatec.  Once the last y value of a vector call
+; is smaller than the line counter the vector call is used up
+; and is removed from VLIST.
+
+; Plot blocks have the following format:
+dsect <	; Note!!! The order of the following is critical
+	.word 0		; link to next plot block
+			;  0 iff this is last block
+			; -1 iff next block not yet in
+vy1::	.word 0		; starting y value
+vy2::	.word 0		; end y value (100000 for horizontal line)
+vmlo::	.word 0		; low 10 bits of vm (bits 15-4)
+vxlo::	.word 0		; low 10 bits of vx (bits 15-4)
+vmhi::	.word 0		; hi 10 bits of vm (bits 9-0)
+vxhi::	.word 0		; hi 10 bits of vx (bits 9-0)
+vlastx::.word 0		; last x value plotted (-1 if none)
+vdash::	.word 0		; dashlin patern
+	>,vblen
+
+
+vgo:	clr vvpos(r4)		; start at line 0
+	clr vlasty(r4)		; start previous y value at something small
+	mov #-1,vlist(r4)	; no blocks on list yet
+.if ne  asmspp
+	mov #1,spplin(r4)	; set so 1st plot line will also print
+	mov #1,@#lvs		; turn on simultaneous print/plot
+.endc
+	jsr pc,@(sp)+		; read and ignore the first two bytes
+	jsr pc,@(sp)+		; ...
+
+
+; Come to VLINE to start processing a line
+vline:	mov r4,r1		; set last block to VLIST
+	add #vlist,r1		; ...
+
+; Come to VNEXT to process next block
+vnext:	mov r1,vlstb(r4)	; save ptr to last block
+	mov (r1),r1		; get ptr to next block
+	beq vplot		; end of input
+	cmp r1,#-1		; next block in yet? (-1 if not in)
+	if eq,<
+	  jmp vstuff		; not in, go stuff another
+	  >
+
+; Come to VPROC to process a plot block
+vproc:	mov vvpos(r4),r0	; get plot line no. we're working on
+	tst (r1)+		; skip over link word
+	cmp r0,(r1)+		; up to this plot block yet?
+	blo vplot		; no, plot current line
+	cmp r0,(r1)+		; check if beyond this plot block
+	bhi vpast		; yes, we're past this plot block
+	cmp -4(r1),-2(r1)	; horizontal line?
+	if eq,<
+	  mov (r1)+,r3		; horizontal line, get x2
+	  cmp (r1)+,(r1)+	; skip over vxlo and vmhi
+	  mov (r1)+,r2		; get x1
+	  tst (r1)+		; move ptr to vdash entry for compatability
+	  sub r2,r3		; get no. of points to put on this plot line
+	  br vhoriz
+	  >
+	add (r1)+,(r1)+		; add vmlo to vxlo
+	adc 2(r1)		; double precision
+	add (r1)+,(r1)		; add vmhi to vxhi
+	bic #176000,(r1)	; clear high bits
+	mov (r1)+,r2		; and copy vxhi (integer part of vx)
+	tst -6(r1)		; high bit set in vxlo?
+	if mi,<
+	  inc r2		; yes, round this x value up
+	  >
+	mov (r1),r3		; get last x for this plot block
+	if mi,<
+	  mov r2,(r1)+		; negative if this is first use
+	  >
+	else <
+	  mov r2,(r1)+		; set last x for next call
+	  sub r2,r3		; get no. of points to put on this plot line
+	  >
+
+; VHORIZ plots horizontal lines.  Used for horizontal vector calls
+; and for portions of other vector calls.
+vhoriz:	mov r2,r0		; r2 will be ptr, r0 will be bit
+	bic #177770,r0		; low three bits select bit pos
+	ash #-3,r2		; bits 3-9 select byte in buffer
+	add r4,r2		; add ptr to buffer
+	add #vbuf,r2		; ...
+	add pc,r0		; get ptr into table of bits
+	movb bits-.(r0),r0	; PICally (of course)
+loop <	  asr (r1)		; check dashline pattern
+	  if cs,<
+	    bis #1000,(r1)	; complete rotate
+	    bisb r0,(r2)	; set bit in buffer
+	    >
+	  tst r3		; going left or right?
+	  exitl eq		; Note: C bit clear so can RORB and ROLB
+	  if pl,<
+	    rolb r0		; moving right.
+	    if cs,<
+	      rolb r0		; set high bit (wrap)
+	      inc r2		; move to next byte
+	      >
+	    sorl r3		; more bits to plot?
+	    >
+	  else <
+	    rorb r0		; moving left, move to next bit
+	    if cs,<
+	      rorb r0		; set low bit (wrap)
+	      dec r2		; and move to previous byte
+	      >
+	    inc r3		; more bits to go?
+	    rptl ne		; loop till all bits done
+	    >
+	  >
+	sub #vdash,r1		; set ptr back to beginning of block
+	br vnext		; do next block
+
+; VPAST is executed when the current line being plotted is beyond
+; the last y value of a vector call.  The vector call is removed
+; from VLIST.
+vpast:	sub #6,r1		; set ptr back to beginning of block
+	mov (r1),@vlstb(r4)	; remove block from VLIST
+	mov vfree(r4),(r1)	; put onto freelist
+	mov r1,vfree(r4)	; ...
+	mov vlstb(r4),r1	; ptr to last block
+	br vnext		; continue from there
+
+; Come to VPLOT to plot current line buffer
+vplot:	push r1,r2,r3		; save regs
+	mov #lvs,r1		; plot status register
+	mov r4,r2		; ptr to line buffer to be plotted
+	add #vbuf+<nvpts/8.>,r2	; ...
+	mov #nvpts/8.,r3	; character count
+.if ne  asmspp
+	dec spplin(r4)		; time to reload print buffer?
+	if eq,<
+	  mov #12.,spplin(r4)	; yes, reset counter
+	  jsr r5,lpout		; call standard routine to print
+	  >
+.endc
+	jsr r5,lvrdy		; wait for LPT ready
+loop <	  tstb (r1)		; wait for ready
+	  rptl pl		; ...
+	  movb -(r2),2(r1)	; send byte to plotter
+	  clrb (r2)		; and clear our buffer as we do
+	  sorl r3		; should gobble 1 line very quickly
+	  >
+	pop r3,r2,r1		; restore regs
+	inc vvpos(r4)		; update line counter
+	tst vlist(r4)		; anything left on list to plot?
+	if ne,<
+	  jmp vline		; stuff left, go process more plot blocks
+	  >
+
+; terminate plot with a FF
+
+1$:	jsr r5,lvrdy		; wait for LPT ready
+	mov #20,@#lvs		; turn off simultaneous print/plot and FF
+
+; free blocks on plot free list
+
+loop <	  mov vfree(r4),r1	; ptr to 1st block on plot freelist
+	  exitl eq		; null ptr ends list
+	  mov (r1),vfree(r4)
+	  push r1
+	  call free
+	  rptl
+	  >
+
+; terminate plot co-routine
+
+	push (sp)		; create slot for fake co-routine PC
+	clr 2(sp)		; will put zero into VPC to terminate plot
+	rts pc			; return to normal character output
+
+
+lvrdy:	push #lvs,#100200	; TWONBN args: address, bit mask
+	call twonbn		; wait for ready bit in plotter status reg
+	tst @#lvs		; error condition?
+	if mi,<
+	  lose %ehgdv		; error, bomb out
+	  br lvrdy		; continued, check again
+	  >
+	rts r5
+
+; This portion of the plot co-routine stuffs plot blocks from the
+; incoming data.
+
+vstuff:	jsr pc,@(sp)+		; get plotting character
+	tstb r0
+	if mi,<
+	  clr @vlstb(r4)	; clear link word in last block
+	  br vplot		; plot current line
+	  >
+	mov vfree(r4),r1	; plot block freelist ptr
+	if eq,<
+	  push #vblen/2		; ALOCW arg: size
+	  call alocl		; get another plot block
+	  pop r1		; val: ptr
+	  >
+	else <
+	  mov (r1),vfree(r4)	; remove block from freelist
+	  clr vxlo(r1)		; zero garbage from last use
+	  >
+	ash #4,r0		; shift left 4 places
+	mov r0,vmhi(r1)		; put in plot block
+	jsr pc,@(sp)+		; get next character
+	clr vmlo(r1)		; start vmlo off zero
+	ror r0			; shift 2 bits from r0 into vmlo<15:14>
+	ror vmlo(r1)		; ...
+	ror r0			; ...
+	ror vmlo(r1)		; ...
+	bis r0,vmhi(r1)		; rest of character goes into vmhi<3:0>
+	jsr pc,@(sp)+		; get next character
+	swab r0			; shift left 8 places
+	bis r0,vmlo(r1)		; and fill in vmlo<13:8>
+	jsr pc,@(sp)+		; get next character
+	ash #2,r0		; shift character left 2
+	bis r0,vmlo(r1)		; set vmlo<7:6>
+	bic #77,vmlo(r1)	; clear unused bits
+	ash #4,r0		; shift character left 4 more
+	mov r0,vdash(r1)	; set vdash<9:6>
+	bic #176000,vdash(r1)	; clear unused bits
+	jsr pc,@(sp)+		; get yet another character
+	bis r0,vdash(r1)	; fill in vdash<5:0>
+	jsr pc,@(sp)+		; another character
+	ash #4,r0		; shift left by 4
+	mov r0,vy2(r1)		; put in vy2<9:4>
+	jsr pc,@(sp)+		; another character
+	movb r0,vy1+1(r1)	; put in vy1<9:8>
+	bic #176377,vy1(r1)	; clear other bits
+	ash #-2,r0		; shift right 2
+	bis r0,vy2(r1)		; and put in vy2<3:0>
+	jsr pc,@(sp)+		; another character
+	ash #2,r0		; shift left 2
+	bis r0,vy1(r1)		; put in vy1<7:2>
+	jsr pc,@(sp)+		; another character
+	ash #4,r0		; shift so 2 bits over byte boundary
+	swab r0			; put 2 bits in low byte
+	bisb r0,vy1(r1)		; put in vy1<1:0>
+	clrb r0			; clear 2 bits
+	swab r0			; restore bytes
+	ash #2,r0		; shift 2 more places left
+	mov r0,vxhi(r1)		; set vxhi<9:6>
+	jsr pc,@(sp)+		; another character
+	bis r0,vxhi(r1)		; set vxhi<5:0>
+	cmp vy1(r1),vy2(r1)	; same starting and stopping y pos?
+	if ne,<
+	  sub vmlo(r1),vxlo(r1)	; no, substract vm from vx since
+	  sbc vxhi(r1)		; first use will add it back
+	  sub vmhi(r1),vxhi(r1)	; ...
+	  >
+	else <
+	  mov vmlo(r1),r0	; get into register
+	  asl r0		; move high ten bits into low ten bits by:
+	  adc r0		; rotating r0 left 2
+	  asl r0
+	  adc r0	  
+	  swab r0		; and then switching bytes
+	  mov r0,vmlo(r1)	; put back
+	  >
+	cmp vy1(r1),vlasty(r4)	; are blocks in ascending order as they
+				; should be?
+	if lo,<
+	  mov vfree(r4),(r1)	; free the block we're on now
+	  mov r1,vfree(r4)	; ...
+	  clr @vlstb(r4)	; clear link word in last block
+	  call sysmsg
+	    .string ^"Bad plot data
+"
+	  jmp vplot
+	  >
+	mov vy1(r1),vlasty(r4)	; save this y value for ascension check
+	mov #-1,vlastx(r1)	; to indicate not yet used
+	mov #-1,(r1)		; -1 indicates next block not yet in
+	mov r1,@vlstb(r4)	; link this block to last block in list
+	mov r1,vlstb(r4)	; save ptr to this plot block
+	jmp vproc
+
+.endc	; ne asmplt

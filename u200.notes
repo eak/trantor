@@ -1,0 +1,88 @@
+                            The User200 Protocol
+
+     The User200 protocol is brain-damaged.  It probably doesn't even work.
+
+Messages the master whips the slave with:     
+	Write message
+	Poll message
+	(Alert)
+
+Messages the slave begs forgiveness with:
+	Read message
+	Acknowledge
+	Reject
+	Error
+
+Example:
+
+	Master			Slave
+	------			-----
+
+	Write-E1				message to display
+				ACK		acknowledge write message
+	POLL					request for user typein
+				REJ		nothing to send
+	POLL
+				REJ
+	POLL
+				Read-E1		send user typein
+	Write-E3				start reading card data
+				ACK		acknowledge write message
+	POLL					request send card data
+				Read-E3		send card data
+	Write-E3				start reading card data
+				ACK
+	POLL
+				REJ		card data not ready
+	POLL
+				Read-E3
+	Write-E3
+				ACK
+	POLL
+				Read-E3 (error)	send card data
+	POLL					request resend card data
+				Read-E3
+	Write-E3 (error)
+				ERROR		error receiving write message
+	Write-E3
+				ACK
+	POLL (error)
+				ERROR
+	POLL
+				Read-E3
+	Write-E3
+				ACK (error)
+	Write-E3
+				ACK
+	POLL
+				Read-E2		send card data and indicate
+						there is no more to follow
+						(i.e.end of hopper or error)
+	Write-E1
+				ACK
+	POLL					request for user typein
+				REJ		nothing to send
+	POLL
+				REJ
+	POLL
+				Read-E1 (error)	send user typein
+	POLL					request resend user typein
+				Read-E1		resend user typein
+	Write-E2				LPT data
+				ACK		acknowledge write message
+	POLL					query about LPT status
+				Read-E3		LPT is ready
+	Write-E2				more LPT data
+				ACK
+	POLL
+				Read-E3		LPT still ok
+	Write-E2				more LPT data
+				ACK
+	POLL
+				Read-E2		LPT hung
+
+;;;Local Modes:
+;;;Mode:Text
+;;;Auto Fill Mode:1
+;;;Fill Column:70
+;;;End:

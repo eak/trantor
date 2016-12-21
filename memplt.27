@@ -1,0 +1,171 @@
+; -*-PALX-*-
+.sbttl	Memory_plot command
+
+x0==64.
+y0==1000.
+x1==4032.
+y1==2000.
+
+
+memplt:	push #300./2		; ALOCL arg: no. of words
+	call alocl		; allocate buffer for title
+	pop r3			; val: ptr
+	push pc			; ATTACH arg1: device name
+	add #bufn-.,(sp)	; ...
+	push r3			; ATTACH arg2: filename (actually buffer ptr)
+	push #0,#0		; ATTACH arg3&4: disk unit #,control bits
+	call attach		; get i/o channel to MPBUF
+	pop r2,r0		; vals: channel id, error code
+	if ne,<
+	  jmp comerr		; go handle error
+	  >
+	push #tvn		; IOA arg: Trantor version no.
+	push r2			; IOA arg: channel id
+	call ioac		; starting consing up title
+.if eq sysexp
+	  .string ^"
+Trantor ^d Free Storage Area at "
+.endc
+.else
+	  .string ^"
+Trantor ^dX Free Storage Area at "
+.endc
+	push r2				; PTIME arg1: channel id
+	push #%pttime+%ptdate+%ptday	; PTIME arg2: control bits
+	call time 		; PTIME args 3 and 4: time lo, time hi
+	call ptime		; put time and date in title
+	push fssize		; IOA arg: no. of words of free storage
+	mov fsata+0,-(sp)	; get no. of words allocated
+	sub fsft+0,(sp)		; subtract no. freed to get no. of words in
+				; use to get IOA arg
+	push fsac		; IOA arg: no. of blocks in use
+	push r2			; IOA arg: channel id
+	call ioac		; put total free storage area size in title
+	  .string ^"
+^d blocks using ^d out of ^d words
+" 
+	push r2			; DETACH arg: channel id
+	call detach		; close channel to buffer
+	call tekbeg		; initiate plotting
+	pop r0			; val: error code
+	if ne,<
+	  jmp comerr		; hack error if non-zero
+	  >
+	push #3124.-90.,#0.	; TEKMOV args: y coordinate, x coordinate
+	call tekmov		; move to home position
+	push r3			; TEKSTR arg1: buffer ptr
+	add #2,(sp)		; text starts at buffer+2
+	push (r3)		; TEKSTR arg2: no. of characters
+	call tekstr		; put out title
+	push r3			; FREE arg: ptr
+	call free		; free up buffer
+	push #66.,#42.		; TEKSIZ args: vertical size, horizontal size
+	call teksiz		; set character size to 3/4 normal
+	push #90.		; TEKROT arg: rotation in degrees
+	call tekrot		; use 90 degree rotation on characters
+; Draw box
+	push #y1,#x0		; TEKMOV args: y coordinate, x coordinate
+	call tekmov		; move to upper left corner
+	push #y1,#x1		; TEKDRW args: y coordinate, x coordinate
+	call tekdrw		; draw to upper right corner
+	push #y0,#x1		; TEKDRW args: y coordinate, x coordinate
+	call tekdrw		; draw to lower right corner
+	push #y0,#x0		; TEKDRW args: y coordinate, x coordinate
+	call tekdrw		; draw to lower left corner
+	push #y1,#x0		; TEKDRW args: y coordinate, x coordinate
+	call tekdrw		; draw to upper left corner
+; Fill in regions
+	push r4			; save reg
+	mov fslo,r5		; ptr to beginning of free storage area
+	mov #x0,r2		; set current x position to left end
+	clr mplax		; clear last address x coordinate
+	call mpaddr		; draw address at left end
+loop <	  mov r2,r4		; set last position to current position
+	  mov (r5),r2		; get length of current block
+	  push r2		; save header word for testing freebit later
+	  asl r2		; times two to convert from words to bytes
+	  add r2,r5		; get address of next block
+	  mov r5,r2		; get offset of block in free storage area
+	  sub fslo,r2		; ...
+	  mul #<x1-x0>,r2	; convert to plotter coordinate
+	  div fssize,r2		; ...
+	  asr r2		; (since FSSIZE is in words)
+	  add #x0,r2		; ...
+	  tst (sp)+		; test freebit of current block
+	  bpl 1$		; free, skip shading
+	  add #8.,r4		; width of rectangle to shade less than 8?
+	  cmp r2,r4		; ...
+	  blo 1$		; yes, skip shading
+	  sub #8.,r4		; restore R4
+	  mov r2,r3		; find x coordinate to shade up to
+	  add #<y1-y0>,r3	; ...
+	  mov r4,r1
+loop <	    add #40.,r1		; next x1
+	    cmp r1,r3		; reached limit?
+	    exitl his
+; Put X1,Y1 on stack
+	    cmp r1,r2
+	    if hi,<
+	      push #y1
+	      sub r1,(sp)
+	      add r2,(sp)
+	      push r2
+	      >
+	    else <
+	      push #y1,r1
+	      >
+; Put X2,Y2 on stack
+	    push #y0,r1
+	    sub #<y1-y0>,(sp)
+	    cmp (sp),r4
+	    if lt,<
+	      mov r4,(sp)
+	      mov #y1,2(sp)
+	      sub r1,2(sp)
+	      add r4,2(sp)
+	      >
+				; TEKLIN args: y1, x1, y2, x2
+	    call teklin		; draw line
+	    rptl
+	    >
+1$:	  cmp r5,fshi		; reached end of free storage area?
+	  exitl his
+	  push #y0,r2,#y1,r2	; TEKLIN args: y1, x1, y2, x2
+	  call teklin
+	  call mpaddr		; draw current address
+	  rptl
+	  >
+	call mpaddr		; draw final address
+	call tekend		; terminate plotting
+	pop r4			; restore reg
+	rts pc
+
+
+; Draw address at current x position.
+mpaddr:	cmp r2,mplax		; too close to last address x coordinate?
+	blos 1$
+	mov r2,mplax		; save for closeness comparision
+	add #49.,mplax
+	push #y1+42.,r2		; TEKMOV args: y coordinate, x coordinate
+	add #20.,(sp)		; ...
+	call tekmov		; move to where address is to go
+	mov (sp),r0		; get address to draw (from saved R5 on stack)
+	clr r1
+	sec			; this insures loop terminates after exactly
+				; six digits
+loop <	  rol r0
+	  rol r1
+	  add #'0,r1
+	  push r1		; TEKASC arg: character
+	  call tekasc		; draw digit
+	  clr r1		; clear for shifting in next octal digit
+	  asl r0
+	  exitl eq
+	  rol r1
+	  asl r0
+	  rol r1
+	  rptl
+	  >
+1$:	return
+
+mplax:	.blkw 1			; last address x coordinate

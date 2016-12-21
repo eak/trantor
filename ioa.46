@@ -1,0 +1,247 @@
+; -*-PALX-*-
+
+; IOA is used to produce ascii output from an asciz control string
+; and a variable no. of arguments whose use is dictated by the
+; control string.  An "^" in the control string serves as a sort
+; of escape character; the next character (possibly proceeded by
+; a decimal arg) is used to edit various arguments or characters
+; into the final output string.  All other characters in the control
+; string are merely copied to the output string.
+
+; Example:
+;	push r1,r2		; IOAC args: seconds, minutes
+;	push och		; IOAC arg: channel id
+;	call ioac		; print out in time format
+;	  .string ^"^d:^2z"	; minutes, a colon, two digits of seconds
+
+
+
+; IOA data area
+dsect <
+	 .blkw 6		; register storage area
+	 .blkw 1		; return R5
+ioacs::	 .blkw 1		; ptr to IOA control string
+ioach::	 .blkw 1		; channel id to output to
+lioab==20.			; size of IOA buffer
+ioabuf:: .blkb lioab		; IOA buffer area
+	 >,lioad
+
+
+.sbttl	IOA entry points
+
+; IOAC is like IOA but takes the control string arg as a relative
+; ptr following the call.
+
+;	ARGS:				VALS:
+; sp ->	channel id			(none)
+;	arg1 - argn
+
+ioac:	push (sp)		; make slot for control string ptr
+	mov r5,2(sp)		; get relative ptr
+	add (r5)+,2(sp)		; make absolute
+; fall through to IOA
+
+
+; IOA
+
+;	ARGS:				VALS:
+; sp ->	control string ptr		(none)
+;	channel id
+;	arg1
+;	 .
+;	 .
+;	 .
+;	argn
+
+ioa:	push r5			; save reg
+	push #lioad/2		; ALOCL arg: size of block
+	call alocl		; allocate IOA data area
+	pop r5			; val: ptr to block
+	.irp s,<r0,r1,r2,r3,r4,(sp)+,(sp)+,(sp)+,(sp)+>
+	  mov s,(r5)+		; save R0-R5, ret R5, cs ptr, and channel id
+	.endm
+	sub #ioach+2,r5		; get ptr to data block again
+	mov ioacs(r5),r3	; get ptr to control string
+	mov r3,ioacs(r5)	; save ptr to control string
+ioal:	mov ioacs(r5),r3	; get ptr to current pos in control string
+	clr r4			; set character count to zero
+loop <	  inc r4		; keep no. of chars until NULL or ^
+	  movb (r3)+,r0		; get character
+	  exitl eq		; end of control string
+	  cmpb r0,#'^		; IOA escape char?
+	  rptl ne
+	  >
+	dec r4			; uncount NULL or ^
+	if ne,<
+	  push ioach(r5),ioacs(r5),r4	; WRITEN args: channel id, ptr, count
+	  call writen
+	  >
+	tst r0			; was last char NULL or ^?
+	bne ioau
+; Return from IOA call
+	.irp s,<r0,r1,r2,r3,r4>
+	  mov (r5)+,s		; restore R0-R4
+	.endm
+	push 2(r5),(r5)		; push return R5 and R5
+	sub #12,r5		; get back ptr to IOA data area
+	push r5			; FREE arg: ptr
+	call free		; free IOA data area
+	pop r5			; restore reg
+	return
+
+.sbttl	IOA formatter
+
+; IOAU reads the character after a ^ in the control string and
+; dispatches to the appropriate formatter.  IOAU also reads parses
+; the command's prefix argument if any.
+ioau:	mov #1,r4		; default argument to 1
+	clr r1			; set argument accumulator to zero
+loop <	  movb (r3)+,r0		; get character after ^
+	  cmp r0,#'0		; digit?
+	  exitl lo
+	  cmp r0,#'9
+	  exitl hi
+	  mul #10.,r1		; multiply arg so far by 10
+	  sub #'0,r0		; add in this digit
+	  add r0,r1		; ...
+	  mov r1,r4		; set argument
+	  rptl
+	  >
+	cmp r4,#lioab		; argument too large (larger than our buffer)?
+	if hi,<
+	  mov #lioab,r4		; yes, set to size of buffer
+	  >
+	mov r3,ioacs(r5)	; save ptr to current pos in control string
+	mov r5,r2		; get ptr to just IOA buffer
+	add #lioad,r2		; ...
+	cmp r0,#'^		; ^^?
+	beq ioa.u
+	cmp r0,#'a		; ^a?
+	beq ioa.a
+	cmp r0,#'d		; ^d?
+	beq ioa.d
+	cmp r0,#'D		; ^D?
+	beq ioa.ud
+	cmp r0,#'e		; ^e?
+	beq ioa.e
+	cmp r0,#'o		; ^o
+	beq ioa.o
+	cmp r0,#'O		; ^O
+	beq ioa.uo
+	cmp r0,#'r		; ^r?
+	beq ioa.r
+	cmp r0,#'z		; ^z?
+	beq ioa.z
+	jmp ioal		; ignore unknown ^ codes
+
+
+; ^^ - Output ^
+ioa.u:	mov #'^,r3		; set pad character to ^
+	br ioapad		; output <arg> ^s
+
+
+; ^e - Output error message
+ioa.e:	call errmsg		; convert error code (on stack) to asciz
+				; error message ptr
+				; fall through to ^a
+
+	
+; ^a - Output asciz
+ioa.a:	pop r0			; pick up next argument, ptr to asciz string
+	push ioach(r5),r0	; WRITEZ args: channel id, asciz ptr
+	call writez		; output string
+	jmp ioal
+
+
+; ^z - Output decimal, pad with zeros instead of spaces
+ioa.z:	mov #'0,r3		; set pad character to zero
+	br ioa.d1
+
+; ^d - Output decimal
+ioa.d:	mov #40,r3		; set pad character to space
+ioa.d1:	pop r0			; get no. to convert to decimal from stack
+loop <	  mov r0,r1		; setup for DIV
+	  clr r0		; ...
+	  div #10.,r0		; get least significant digit in remainder
+	  add #'0,r1		; convert to ascii
+	  movb r1,-(r2)		; store in buffer
+	  dec r4		; decrement field size
+	  tst r0		; more (non-zero) digits to go?
+	  rptl ne
+	  >
+	br ioapad
+
+
+; ^D - Output double word decimal
+ioa.ud:	pop r0,r1		; get no. to convert to decimal from stack
+	mov r2,r3		; copy buffer ptr
+loop <	  push r3,r4,r5		; save regs
+	  jsr pc,ddiv10		; divide r0,r1 by 10, remainder in r2
+	  pop r5,r4,r3		; restore regs
+	  add #'0,r2		; convert to ascii
+	  movb r2,-(r3)		; store in buffer
+	  dec r4		; decrement field size
+	  tst r0		; more (non-zero) digits to go?
+	  rptl ne
+	  tst r1
+	  rptl ne
+	  >
+	mov r3,r2		; copy buffer ptr back
+	mov #40,r3		; set pad character to space
+	br ioapad
+
+; ^O - leading zero octal (btw, if you reallywanted a full word octal like
+;      Multics has, its just ^5O dummy)
+ioa.uo:	mov #'0,r3		; set pad character to zero
+	br ioa.o1
+
+; ^o - Output octal
+ioa.o:	mov #40,r3		; set pad character to space
+ioa.o1:	mov (sp)+,r0		; get no. in R0
+loop <	  mov r0,r1		; extract low octal digit from no.
+	  bic #177770,r1	; ...
+	  add #60,r1		; convert to ascii digit
+				; Note: Carry is cleared by this addition
+				; and not changed by next two intructions
+	  movb r1,-(r2)		; store digit in buffer
+	  dec r4		; decrement field size
+	  ror r0		; we use a ror here to avoid propogating
+	  asr r0		; sign bit first time as ash would do, but
+	  asr r0		; after the first bit, we can use ASR
+	  rptl ne		; is the number all gone?
+	  >
+	br ioapad
+
+	
+; ^r - Output rad50
+ioa.r:	mov (sp)+,r0		; get word of rad50 from stack
+	mov r5,r2		; get ptr to just past IOA buffer
+	add #lioad,r2		; ...
+	jsr pc,ioa.r1		; store 3rd char
+	jsr pc,ioa.r1		; store 2nd char
+	jsr pc,ioa.r1		; store 1st char
+	push ioach(r5),r2,#3	; WRITEN args: channel id, ptr, count
+	call writen		; write out the three chars just converted
+	jmp ioal
+
+ioa.r1:	mov r0,r1		; setup for DIV
+	clr r0			; ...
+	div #50,r0		; get rightmost rad50 char in R1, rest in R0
+	add pc,r1		; for PIC use of conversion table
+	movb r50asc-.(r1),-(r2)	; convert char to ascii and store in buffer
+	rts pc
+
+r50asc:	.ascii " ABCDEFGHIJKLMNOPQRSTUVWXYZ$%.0123456789"
+	.even
+
+
+; Pad out field with character in R3.
+ioapad:	dec r4			; keep going until field size goes negative
+	bmi 1$
+	movb r3,-(r2)		; put pad character in buffer
+	br ioapad
+1$: 	push ioach(r5),r2,r5	; WRITEN args: channel id, ptr, count
+	add #lioad,(sp)		; ...
+	sub r2,(sp)		; ...
+	call writen		; write out field
+	jmp ioal

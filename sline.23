@@ -1,0 +1,263 @@
+; Synchronous line module			-*-PALX-*-
+
+
+.if ne  ndp
+
+; DPINIT is called at system startup time to initialize the DP11s on the
+; system.
+dpinit:
+.rept ndp
+	jsr r5,vecset		; setup DP11 interrupt vector
+	  .word dpv+<.rpcnt*10>,pr5+.rpcnt,dprint-.,dpxint-.
+.endr
+; fall through to DPPWRU
+
+; DPPWRU is called when power is restored to reinitialize the DP11s.
+dppwru:	mov pc,r1		; ptr to DPCSR
+	add #dpcsr-.,r1		; ...
+	mov pc,r2		; ptr to DPDTP
+	add #dpdtp-.,r2		; ...
+.rept ndp
+	clr (r1)+
+	clr (r2)+
+.endr
+        sub #ndp*2,r1		; get back pointer to DPCSR
+	call catchn		; setup NXM catch for testing DPs
+	  1$-.
+.rept ndp
+	clr @#174770-<.rpcnt*10>	; clear RCSR
+	clr @#174770-<.rpcnt*10>+4	; clear XCSR
+	mov #174770-<.rpcnt*10>,<.rpcnt*2>(r1)	; save address
+.endr
+1$:	return
+
+dpcsr:	.blkw ndp
+dpdtp:	.blkw ndp
+.endc	; ne ndp
+
+
+.if ne  ndu
+
+; DUINIT is called at system startup time to initialize the DU11s on the
+; system.
+duinit:
+.rept ndu
+	jsr r5,vecset		; setup DU11 interrupt vector
+	  .word duv+<.rpcnt*10>,pr5+.rpcnt,durint-.,duxint-.
+.endr
+; fall through to DUPWRU
+
+; DUPWRU is called when power is restored to reinitialize the DU11s.
+dupwru:	mov pc,r1		; ptr to DUCSR
+	add #ducsr-.,r1		; ...
+	mov pc,r2		; ptr to DUDTP
+	add #dudtp-.,r2		; ...
+.rept ndu
+	clr (r1)+
+	clr (r2)+
+.endr
+        sub #ndu*2,r1		; get back pointer to DUCSR
+	call catchn		; setup NXM catch for testing DUs
+	  1$-.
+.rept ndu
+	mov #400,@#duaddr+<.rpcnt*10>+4			; do master reset
+	mov #duaddr+<.rpcnt*10>,<.rpcnt*2>(r1)		; save address
+.endr
+1$:	return
+
+ducsr:	.blkw ndu
+dudtp:	.blkw ndu
+.endc	; ne ndu
+
+; SYNASN is called to assign a DU or a DP to someone.
+; It uses the data table ptr it is called with to lock the table.
+
+;	ARGS:				VALS:
+; SP -> data table pointer	 SP ->	0 for DP, or -1 for DU
+;					CSR address for DP or DU
+;					error code
+
+synasn:	push (sp),(sp)		; create slots for two more return values
+	clr 4(sp)		; make sure return zero CSR address if fail
+	peof			; no preemption while testing table entry
+
+; Always assign the DP first if it exists 
+
+.if ne  ndp
+	tst dpdtp+0		; DP11 in use?
+	if eq,<
+	  mov 6(sp),dpdtp+0	; put structure ptr in table
+	  peon			; allow preemption again
+	  mov dpcsr+0,4(sp)	; return CSR address of DP11
+	  clr 2(sp)		; zero for DP11
+	  clr 6(sp)		; return zero error code for success
+	  return
+	  >
+.endc
+.if ne  ndu
+	tst dudtp+0		; DU11 in use?
+	if eq,<
+	  mov 6(sp),dudtp+0	; put structure ptr in table
+	  peon			; allow preemption again
+	  mov ducsr+0,4(sp)	; return CSR address of DU11
+	  mov #-1,2(sp)		; nonzero for DU11
+	  clr 6(sp)		; return zero error code for success
+	  return
+	  >
+.endc
+	peon			; allow preemption again
+	mov #%enadv,6(sp)	; give device not available error
+	return
+
+
+; SYNDEA is called to deassign a DU or a DP.
+
+;	ARGS:				VALS:
+; SP -> data table pointer		(none)
+
+syndea:	push r1			; save reg
+.if ne  ndp
+	cmp dpdtp+0,4(sp)	; this the one?
+	if eq,<
+	  clr dpdtp+0		; clear entry, making device free
+	  mov dpcsr+0,r1	; get address of DP11 we're freeing
+	  clr (r1)		; clear everything
+	  clr 4(r1)		; ...
+	  br 1$
+	  >
+.endc
+.if ne  ndu
+	cmp dudtp+0,4(sp)	; this the one?
+	if eq,<
+	  clr dudtp+0		; clear entry making device free
+	  mov ducsr+0,r1	; get address of DU11 we're freeing
+	  mov #400,4(r1)	; do a Master Reset
+	  br 1$
+	  >
+.endc
+1$:	pop r1,(sp)		; restore reg, remove argument from stack
+	return
+
+.sbttl	DP11 and DU11 interrupt handlers
+
+; This module attempts to make the DP11 and DU11 appear as similar as
+; possible.  Receiver and transmitter interrupts are handled and translated
+; into five more relevant groups: character received, reception error,
+; transmitter ready, loss of carrier, and clear to send.  The DP11 gives
+; no clear to send interrupt, but then it is not necessary to wait for
+; clear to send on a DP11 so thats ok (just start sending!).
+
+
+.if ne  ndu
+; DU11 receiver and status interrupts.
+durint:	mfps -(sp)		; save PS for unit no.
+	jsr r5,save6		; save regs
+	mov 14(sp),r1		; get PS with unit no. in low four bits
+	bic #177760,r1		; clear all but low bits
+	asl r1			; times two for word addressing
+	add pc,r1		; for PICness
+1$:	mov dudtp-1$(r1),r4	; ptr to User200 data structure
+	mov ducsr-1$(r1),r1	; address of DU11
+	mov (r1),r0		; get RCSR
+	if mi,<			; status interrupt, determine which one
+	  bit #20000,r0		; clear to send?
+	  if ne,<
+	    jmp ucts		; yes, call clear to send entry
+	    >
+;	  bit #10000,r0		; carrier?  This commented out because
+;      	  if eq,<		;           the code is not necessary with
+;	      jmp unocar        ; call lost carrier entry
+;	    >			            the DU11.......-RLL
+	  br dpuret		; ignore all else
+	  >
+	mov 2(r1),r0		; get received character
+	if mi,<
+	  tst (r1)+		; point to err reg;no side effects on read??
+	  bit #10000,(r1)	; check for parity error
+	  if ne,<
+	    tst %upar(r4)
+	    if ne,<
+	      jmp urpare	; parity error detected
+	      >
+	    >
+	  bit #20000,(r1)	; framing error
+	  if ne,<
+	    tst %ufrm(r4)	; ignoring framing errors?
+	    if ne,<
+	      jmp urfrme
+	      >
+	    >
+	  bit #40000,(r1)	; overrun error
+	  if ne,<
+	    tst %uovr(r4)	; ignoring overrun errors?
+	    if ne,<
+	      jmp urover	; call receiver error entry
+	      >
+	    >
+	  >
+	jmp urchar		; call receiver char entry
+
+
+; DU11 transmitter interrupt.
+duxint:	mfps -(sp)		; save PS for unit no.
+	jsr r5,save6		; save regs
+	mov 14(sp),r1		; get PS with unit no. in low four bits
+	bic #177760,r1		; clear all but low bits
+	asl r1			; times two for word addressing
+	add pc,r1		; for PICness
+1$:	mov dudtp-1$(r1),r4	; ptr to User200 data structure
+	mov ducsr-1$(r1),r1	; address of DU11
+	jmp uxrdy		; call transmitter ready entry
+
+.endc	; ne ndu
+
+
+.if ne  ndp
+; DP11 receiver interrupt.
+dprint:	mfps -(sp)		; save PS for unit no.
+	jsr r5,save6		; save regs
+	mov 14(sp),r1		; get PS with unit no. in low four bits
+	bic #177760,r1		; clear all but low bits
+	asl r1			; times two for word addressing
+	add pc,r1		; for PICness
+1$:	mov dpdtp-1$(r1),r4	; ptr to User200 data structure
+	mov dpcsr-1$(r1),r1	; address of DP11
+	movb 2(r1),r0		; get received character
+	bit #10000,(r1)		; test parity
+	if eq,<
+	  tst %upar(r4)
+	  if ne,<
+	    jmp urpare		; even parity, call receiver error entry
+	    >	
+	  >
+	jmp urchar		; call receiver char entry
+
+
+; DP11 transmitter and status interrupts.
+dpxint:	mfps -(sp)		; save PS for unit no.
+	jsr r5,save6		; save regs
+	mov 14(sp),r1		; get PS with unit no. in low four bits
+	bic #177760,r1		; clear all but low bits
+	asl r1			; times two for word addressing
+	add pc,r1		; for PICness
+1$:	mov dpdtp-1$(r1),r4	; ptr to User200 data structure
+	mov dpcsr-1$(r1),r1	; address of DU11
+	mov 4(r1),r0		; get XCSR
+	if mi,<
+	  jmp unocar		; call lost carrier entry
+	  >
+	bit #40000,r0		; receiver overrun?
+	if ne,<
+	  tst %uovr(r4)
+	  if ne,<
+	    jmp urover		; call receiver error entry
+	    >
+	  >
+	cmpb r0,#140		; see if both interrupt enable and done on
+	blo dpuret
+	jmp uxrdy		; yes, we want to send and it's ready
+.endc
+
+dpuret:	jsr r5,rest6		; restore regs
+	tst (sp)+		; remove PS pushed for unit no.
+	rti

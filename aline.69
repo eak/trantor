@@ -1,0 +1,797 @@
+; -*-PALX-*-
+
+; This module manages the asynchronous lines connected to the system.
+; The following asynchronous line interfaces are supported:
+;	KL11	single line interface
+;	DL11	single line interface
+;	DZ11	8-line interface
+
+; Each line is assinged a number.  The system console (i.e. the KL11 at
+; 177560) is always line 0.  The KL11s have the next NKL line no.s, the
+; DL11s the next NDL, and finally the DZ11 lines occupy the last NDZ*8
+; line no.s.
+
+; For the MIT system the line no.s are currently as follows:
+;	Line no.  Interface	Connection
+;	 0	  KL11(DL11-W)	LA120 (system console)
+;	 1	  DL11-E	not used (autodialer??)
+;	 2	  DL11-E	Tektronix 4662 plotter
+;	 3	  DL11-E	HP2645A
+;	 4	  DL11-E	Vadic 305 modem (dialup 300)
+;	 3	  DZ11,0	StupidBee
+;	 4	  DZ11,1	VT52 #1
+;	 5	  DZ11,2	VT52 #2
+;	 6	  DZ11,3	VT52 #3
+;	 7	  DZ11,4	HP2645A
+;	 8	  DZ11,5	Vadic 3415 modem (dialup 1200)
+;	 9	  DZ11,6	Line to HP3000
+;	10	  DZ11,7	MC-ITS 9600 baud line
+
+;	New DL11-E assignments
+;	Address	   Vector     Speed	Options
+;	175610	    310	       1200	No parity,8 bits,1 Stop bit
+;	175620	    320	       1200	Even parity,7 bits,1 Stop bit(Plotter)
+;	175630	    330	        300	No parity,8 bits,1 Stop bit
+;	175640	    340	       4800	No parity,8 bits,1 Stop bit
+
+
+; For Steve Orszag's system the line no.s are currently as follows:
+;	Line no.  Interface	Connection
+;	 0	  DLV11-J	VT52 (system console)
+;	 1	  DLV11-J	Vadic 305 modem (300 baud)
+;	 2	  DLV11-J	Vadic 3415 modem (1200 baud)
+;	 3	  DLV11-J	Spinwriter printer
+;	 4	  DLV11		LA180
+
+
+.sbttl	Definitions
+
+; Define queue structure
+dsect <
+qsize::	 .blkw 1	; size of queue buffer
+qbp::	 .blkw 1	; ptr to buffer used as queue
+qfp::	 .blkw 1	; ptr to front of queue
+qrp::	 .blkw 1	; ptr to rear of queue
+qcc::	 .blkw 1	; room left in queue
+	 >,lq
+
+
+; Define asynchronous line data structure
+dsect <
+	 .blkw 1		; device address
+aldres:: .blkb 1		; nonzero if device responding
+almode:: .blkb 1		; holds flags for flow control purposes
+	 .even
+alib::	 .blkw 1		; bit to turn on interrupts for line
+aliq::	 .blkb lq		; input queue
+aloq::	 .blkb lq		; output queue
+	 >,laltab
+
+%alxon==1			; this bit nonzero in ALMODE means DEC flow
+				; control protocol enabled for that line
+%alstp==2			; this bit nonzero in ALMODE means we've just
+				; received a ^S and holding output till ^Q
+				
+
+	nal==1+nkl+ndl+<ndz*8>	; no. of asynchronous lines
+
+.macro	al addr,ibit
+	.word addr		; device address,
+	.word 0			; device responding flag
+	.word ibit		; interrupt bit for line
+	.blkb lq		; input queue
+	.blkb lq		; output queue
+.endm
+
+
+altab:	al 177560,100			; Console terminal
+ifMIT <
+  .rept nkl
+	al 176500+<.rpcnt*10>,100	; KL11s
+  .endr
+      >
+ifSAO <
+  .rept nkl
+        al 177500+<.rpcnt*10>,100	; KL11s
+  .endr
+      >
+
+.rept ndl
+	al 175610+<.rpcnt*10>,100	; DL11s  
+.endr
+.rept ndz
+	al dzaddr+<.rpcnt*10>,1
+	al dzaddr+<.rpcnt*10>,2
+	al dzaddr+<.rpcnt*10>,4
+	al dzaddr+<.rpcnt*10>,10
+	al dzaddr+<.rpcnt*10>,20
+	al dzaddr+<.rpcnt*10>,40
+	al dzaddr+<.rpcnt*10>,100
+	al dzaddr+<.rpcnt*10>,200
+.endr
+
+
+altabp:	.blkw nal		; array of ptrs to LTAB entries
+
+.sbttl	Initialization
+
+
+; Line no. assignments
+klno==1
+dlno==klno+nkl
+dzno==dlno+ndl
+
+
+; DINIT is called to initialize the asynchronous lines at system startup.
+dinit:	jsr r5,vecset		; setup console terminal interrupt vector
+	  .word 60,pr4+0,dlrint-.,dlxint-.
+
+.rept nkl
+	jsr r5,vecset		; setup KL11 interrupt vector
+	  .word klv+<.rpcnt*10>,pr4+klno+.rpcnt,dlrint-.,dlxint-.
+.endr
+
+.rept ndl
+	jsr r5,vecset		; setup DL11 interrupt vector
+	  .word dlv+<.rpcnt*10>,pr4+dlno+.rpcnt,dlrint-.,dlxint-.
+.endr
+
+.if ne  ndz
+	jsr r5,vecset		; setup DZ11 interrupt vector
+	  .word dzv,pr5,dzrint-.,dzxint-.
+	clr dzric+0
+	clr dzric+2
+	clr dzrcc+0
+	clr dzrcc+2
+	clr dzxic+0
+	clr dzxic+2
+	clr dzxcc+0
+	clr dzxcc+2
+.endc
+
+; DINIT now falls into DPWRU which turns on interrupt enable bits.
+
+
+; DPWRU is called when power returns after a power fail.  It restarts i/o
+; on the asynchronous lines.
+dpwru:	mov pc,r1		; ptr to ALTAB
+	add #altab-.,r1		; ...
+	mov #nal,r0		; no. of lines
+loop <	  clrb aldres(r1)	; clear device responding flag word
+	  add #laltab,r1	; move ptr to next entry
+	  sorl r0
+	  >
+
+	mov #100,@#tks		; turn on console terminal interrupts
+	mov #100,@#tps		; ...
+	movb #1,altab+aldres	; indicate device responding
+
+.if ne  nkl
+	call catchn		; setup NXM catch for testing KLs
+	  1$-.
+ifMIT <
+  .rept nkl
+	mov #100,@#176500+<.rpcnt*10>	; turn on KL interrupts
+	mov #100,@#176504+<.rpcnt*10>	; ...
+	movb #1,altab+aldres+<<klno+.rpcnt>*laltab>
+  .endr
+      >
+ifSAO <
+  .rept nkl
+	mov #100,@#177500+<.rpcnt*10>	; turn on KL interrupts
+	mov #100,@#177504+<.rpcnt*10>	; ...
+	movb #1,altab+aldres+<<klno+.rpcnt>*laltab>
+  .endr
+      >
+
+1$:
+.endc
+
+.if ne  ndl
+	call catchn		; setup NXM catch for testing DLs
+	  2$-.
+.rept ndl
+	mov #106,@#175610+<.rpcnt*10>	; turn on DL interrupts
+	mov #100,@#175614+<.rpcnt*10>	; ...
+	movb #1,altab+aldres+<<dlno+.rpcnt>*laltab>
+.endr
+2$:
+.endc
+
+.if ne  ndz
+	call catchn		; setup NXM catch for testing DZ
+	  3$-.
+	mov #dzaddr,r4		; address of DZ11
+	mov #20,(r4)		; initialize
+	clr nxmcat		; we have a DZ11, clear NXM catch
+loop <	  bit #20,(r4)		; wait for init to finish
+	  rptl ne
+	  >
+	mov pc,r3		; ptr to list of line parameters
+	add #dzlpar-.,r3	; ...
+	mov #8.,r0		; no. of DZ11 lines
+	mov pc,r2		; ptr to ALTAB+ALDRES for 1st DZ line
+	add #altab+aldres+<dzno*laltab>-.,r2
+loop <	  movb #1,(r2)		; set line responding flag
+	  add #laltab,r2	; advance ptr
+	  mov (r3)+,2(r4)	; setup line parameter register
+	  sorl r0
+	  >
+	mov #177777,4(r4)	; set all data term rdys, set all line enabs
+	mov #040140,(r4)	; turn on ints, start DZ11
+3$:
+.endc
+
+	return
+
+
+; VECSET is used to initialize interrupt vectors.
+vecset:	mov (r5)+,r1		; pick up vector address
+	mov (r5)+,r2		; pick up priority
+	mov r5,(r1)		; set rcvr interrupt vector PC
+	add (r5)+,(r1)+		; ...
+	mov r2,(r1)+		; set rcvr interrupt vector PS
+	mov r5,(r1)		; set xmit interrupt vector PC
+	add (r5)+,(r1)+		; ...
+	mov r2,(r1)+		; set xmit interrupt vector PS
+	rts r5
+
+.sbttl	Asynchronous Line i/o
+
+; ALINIT initializes the asynchronous line module.
+alinit:	mov pc,r1		; ptr to line table
+	add #altab-.,r1		; ...
+	mov #nal,r0		; no. of lines
+	mov pc,r3		; ptr to line table ptrs
+	add #altabp-.,r3	; ...
+loop <	  mov r1,(r3)+		; save ptr to line table entry
+	  push #20./2,#60.	; ALOCW args: size, timeout
+	  call alocw		; allocate input buffer
+	  pop r2,*		; vals: ptr, error code
+	  bne 1$
+	  clrb aldres(r2)	; clear line responding flag
+	  clrb almode(r2)	; clear other mode bits
+	  push r2,#20.,r1	; QINIT args: buf size, buf ptr, queue ptr
+	  add #aliq,(sp)	; ...
+	  jsr r5,qinit		; initialize input queue
+	  push #60./2,#60.	; ALOCW args: size, timeout
+	  call alocw		; allocate output buffer
+	  pop r2,*		; vals: ptr, error code
+	  bne 1$
+	  push r2,#60.,r1	; QINIT args: buf size, buf ptr, queue ptr
+	  add #aloq,(sp)	; ...
+	  jsr r5,qinit		; initialize output queue
+	  add #laltab,r1	; move to next line
+	  sorl r0
+	  >
+	return
+1$:	crash ^"No memory"
+
+
+; ALREBF reallocates the buffers for asynchronous line input and output
+; queues.  This allows the no. of characters buffered to be dynamically
+; changed.
+
+;	ARGS:				VALS:
+; SP ->	output buffer size	 SP ->	error code
+;	input buffer size
+;	line no.
+
+alrebf:	push r1,r2		; save regs
+	mfps -(sp)		; save priority
+	mov 14(sp),r1		; get line no. argument
+	asl r1			; times two for indexing
+	add pc,r1		; for PICness
+	mov altabp-.(r1),r1	; get ptr to ALTAB entry
+	cmp 12(sp),aliq+qsize(r1)	; already right size?
+	if ne,<			; no, reallocate
+	  push aliq+qbp(r1)	; save ptr to old queue buffer
+	  push 12+2(sp)		; ALOCW arg1: size
+	  inc (sp)		; increment so odd sizes will win
+	  asr (sp)		; divide by two to get no. of words
+	  push #60.		; ALOCW arg2: timeout
+	  call alocw		; allocate input buffer
+	  pop r2,14+2(sp)	; vals: ptr, error code
+	  bne 2$
+	  push r2,12+4(sp),r1	; QINIT args: buf ptr, buf size, queue ptr
+	  add #aliq,(sp)	; ...
+	  spl 5			; set high priority while redoing queue
+	  jsr r5,qinit		; initialize input queue
+	  mtps 2(sp)		; restore priority
+	  call free		; free old input queue buffer (arg on stack)
+	  >
+	cmp 10(sp),aloq+qsize(r1)	; already the right size?
+	if ne,<
+	  push aloq+qbp(r1)	; save ptr to old queue buffer
+	  push 10+2(sp)		; ALOCW arg1: size
+	  inc (sp)		; increment so odd sizes will win
+	  asr (sp)		; divide by two to get no. of words
+	  push #60.		; ALOCW arg2: timeout
+	  call alocw		; allocate output buffer
+	  pop r2,14+2(sp)	; vals: ptr, error code
+	  bne 2$
+	  push r2,10+4(sp),r1	; QINIT args: buf size, buf ptr, queue ptr
+	  add #aloq,(sp)	; ...
+	  spl 5			; set high priority while redoing queue
+	  jsr r5,qinit		; initialize input queue
+	  mtps 2(sp)		; restore priority
+	  call free		; free old input queue buffer
+	  >
+1$:	mtps (sp)+		; restore priority
+	pop r2,r1		; restore regs
+	pop (sp),(sp)		; remove two args from the stack
+	return
+2$:	pop *			; remove thing from stack
+	br 1$
+
+
+; ALSMOD sets the modes of an asynchronous line
+
+;	ARGS:				VALS:
+; SP -> modes (as in ALMODE)		none
+;	line no.
+
+alsmod:	push r1			; save reg
+	mov 6(sp),r1		; get line no.
+	asl r1			; times two for indexing
+	add pc,r1		; convert to offset into line table entry ptr
+	mov altabp-.(r1),r1	; ...
+	movb 4(sp),almode(r1)	; set the modes
+	pop r1,(sp),(sp)	; restore regs, remove args
+	return
+
+
+; ALGMOD gets the modes of an asynchronous line
+
+;	ARGS:				VALS:
+; SP -> line no.		  SP -> modes (as in ALMODE)
+
+algmod:	push r1			; save reg
+	mov 4(sp),r1		; get line no.
+	asl r1			; times two for indexing
+	add pc,r1		; convert to offset into line table entry ptr
+	mov altabp-.(r1),r1	; ...
+	movb almode(r1),4(sp)	; get modes
+	pop r1			; restore reg
+	return
+
+; ALREAD reads a character from the input queue of an asynchronous line.
+; REMW is first called to wait until a character is really in the queue.
+
+;	ARGS:				VALS:
+; SP ->	timeout			 SP ->	character
+;	line no.			error code
+
+alread:	push r1			; save reg
+	mov 6(sp),r1		; get line no.
+	asl r1			; times two for indexing
+	add pc,r1		; convert to offset into line table entry ptr
+	mov altabp-.(r1),r1	; ...
+	add #aliq,r1		; make ptr to input queue structure
+	push r1,4+2(sp)		; REMW args: queue ptr, timeout
+	jsr r5,remw		; wait for a character to arrive in queue
+	pop 6(sp)		; val: error code, pass it along
+	if eq,<
+	  push r1		; REMQ arg: queue ptr
+	  jsr r5,remq		; remove character from queue
+	  pop 4+2(sp),6(sp)	; vals: character, error code
+	  >
+	pop r1			; restore reg
+	return
+
+
+.if ne asmpek
+; ALPEEK reads a character from the input queue of an asynchronous line.
+; but doesn't remove it from the input queue.
+; REMW is first called to wait until a character is really in the queue.
+
+;	ARGS:				VALS:
+; SP ->	timeout			 SP ->	character
+;	line no.			error code
+
+alpeek:	push r1			; save reg
+	mov 6(sp),r1		; get line no.
+	asl r1			; times two for indexing
+	add pc,r1		; convert to offset into line table entry ptr
+	mov altabp-.(r1),r1	; ...
+	add #aliq,r1		; make ptr to input queue structure
+	push r1,4+2(sp)		; REMW args: queue ptr, timeout
+	jsr r5,remw		; wait for a character to arrive in queue
+	pop 6(sp)		; val: error code, pass it along
+	if eq,<
+	  push r1		; REMQ arg: queue ptr
+	  jsr r5,peekq		; remove character from queue
+	  pop 4+2(sp),6(sp)	; vals: character, error code
+	  >
+	pop r1			; restore reg
+	return
+.endc
+
+; ALWRIT outputs a character to an asynchronous line by inserting it in
+; its output queue.  If necessary ALWRIT waits until there is room in the
+; queue.
+
+;	ARGS:				VALS:
+; SP ->	character			(none)
+;	line no.
+
+alwrit:	push r1,r4		; save regs
+	mov 10(sp),r1		; get line no.
+	asl r1			; times two for indexing
+	add pc,r1		; convert line no. to line table entry ptr
+	mov altabp-.(r1),r1	; ...
+	tstb aldres(r1)		; device responding?
+	if ne,<
+	  mov (r1),r4		; device address
+	  add #aloq,r1		; make ptr to output queue structure
+	  push #1,r1		; ROOMQ args: no. of characters, queue ptr
+	  jsr r5,roomq		; wait for room for 1 character
+	  push 6(sp),r1		; INSQ args: character, queue ptr
+	  jsr r5,insq		; insert character into queue
+	  pop *			; val: error code
+	  sub #aloq,r1		; restore ptr to line table entry
+	  bisb alib(r1),4(r4)	; turn on this line's interrupt enable
+	  >
+	pop r4,r1,(sp),(sp)	; restore regs, remove args from stack
+	return
+
+
+; ALWRIZ outputs an ASCIZ string to the specified line no.  The ASCIZ
+; string is specified by a relative ptr following the call.
+
+;	ARGS:				VALS:
+; SP ->	line no.			(none)
+
+alwriz:	push r1			; save reg
+	mov r5,r1		; pick up relative ptr after call
+	add (r5)+,r1		; make absolute ptr
+loop <	  tstb (r1)		; end of string?
+	  exitl eq
+	  push 4(sp)		; ALWRIT arg1: line no.
+	  movb (r1)+,-(sp)	; ALWRIT arg2: character
+	  jsr r5,alwrit		; send this character
+	  rptl
+	  >
+	pop r1,(sp)		; restore reg, remove arg from stack
+	return
+
+.sbttl	DZ interrupt handlers
+
+.if ne  ndz
+
+; DZ11 receiver interrupt handler.
+dzrint:	push r0,r1,r4		; save regs
+	add #1,dzric+0		; increment DZ11 receiver interrupt count
+	adc dzric+2		; ...
+	mov #dzaddr,r4		; address of DZ11
+loop <	  mov 2(r4),r0		; read RBUF
+	  exitl pl		; character not valid, stop reading silo
+	  inc intflg		; indicate interrupt has occured
+	  add #1,dzrcc+0	; increment DZ11 receiver character count
+	  adc dzrcc+2		; ...
+	  mov r0,r1		; get DZ11 line no.
+	  swab r1		; ...
+	  bic #177770,r1	; ...
+	  add #dzno,r1		; convert to Trantor line no.
+	  bic #103400,r0	; clear data valid bit and line no.
+	  jsr r5,alrint		; call general rcvr interrupt routine
+	  rptl
+	  >
+	pop r4,r1,r0		; restore regs
+	rti
+
+dzric:	.word 0,0		; no. of DZ11 receiver interrupts
+dzrcc:	.word 0,0		; no. of DZ11 receiver characters
+
+
+; DZ11 transmitter interrupt handler.
+dzxint:	push r1,r4		; save regs
+	add #1,dzxic+0		; increment DZ11 transmitter interrupts
+	adc dzxic+2		; ...
+	mov #dzaddr,r4		; address of DZ11
+loop <	  mov (r4),r1		; read CSR
+	  exitl pl		; no more lines ready
+	  inc intflg		; indicate interrupt has occured
+	  add #1,dzxcc+0	; increment DZ11 transmitter character count
+	  adc dzxcc+2		; ...
+	  swab r1		; get DZ11 line no.
+	  bic #177770,r1	; ...
+	  add #dzno,r1		; convert to Trantor line no.
+	  jsr r5,alxint		; call general xmtr interrupt routine
+	  rptl
+	  >
+	pop r4,r1		; restore regs
+	rti
+
+dzxic:	.word 0,0		; no. of DZ11 receiver interrupts
+dzxcc:	.word 0,0		; no. of DZ11 receiver characters
+
+.endc	; ne  ndz
+
+.sbttl	KL and DL interrupt handlers
+
+.if ne  nkl+ndl
+
+; KL11 and DL11 receiver interrupt handler.
+dlrint:	mfps -(sp)		; save PS to extract unit no.
+	push r0,r1,r4		; save regs
+	inc intflg		; indicate interrupt has occurred
+	mov 6(sp),r1		; get PS (unit no. in cc bits)
+	bic #177760,r1		; ...
+	mov r1,r4		; copy
+	asl r4			; times two for indexing
+	add pc,r4		; for PICness
+	mov @altabp-.(r4),r4	; get device address
+	mov 2(r4),r0		; get character
+	jsr r5,alrint		; call general rcvr interrupt routine
+	pop r4,r1,r0,*		; restore regs, remove PS from stack
+	rti
+
+; KL11 and DL11 transmitter interrupt handler.
+dlxint:	mfps -(sp)		; save ps to extract unit no.
+	push r1			; save reg
+	inc intflg		; indicate interrupt has occured
+	mov 2(sp),r1		; get PS (unit no. in cc bits)
+	bic #177760,r1		; ...
+	jsr r5,alxint		; call general xmtr interrupt routine
+	pop r1,*		; restore reg, remove PS from stack
+	rti
+
+.endc	; ne ndl
+
+; ALRINT
+
+;	ARGS:				VALS:
+; R0:	character			(none)
+; R1:	line no.
+
+alrint:
+ifSAO <				; the break character on SAO's machine
+				; can be a ^\ or a <break>
+        cmpb #34,r0		; see if it's a requested break
+	beq 5$			; yes, break for Steve
+	cmpb #234,r0		; have to test both parities
+	beq 5$			; break??? but of course if equal
+      >
+	bit #20000,r0		; Framing Error on this Character??
+	if ne,<			; yes, treat as a break
+5$:	  push r2		; save register
+	  mov pc,r2		; get pointer to TTAB
+	  add #ttab-.,r2	; ....
+	  mov #ntty,r0		; number of TTY lines
+  loop  <   cmp r1,tlinen(r2)	; is this the right Asynchronous line??
+	    exitl eq		; yes, we found it
+	    add #lttab,r2	; move to next terminal entry
+	    sorl r0		; and look at it
+	    br 3$		; this line is not a TTY so treat as a
+				; regular character
+	    >
+	  mov #-1,tbreak(r2)	; a break occurred on this line
+	  pop r2		; restore register
+	  rts r5		; no more processing necessary
+
+; break was not a TTY line.
+
+3$:	 pop r2			; restore register
+	 >
+
+; We have a good character so put it in the right queue for the line it
+; was typed on.
+
+	asl r1			; times two for indexing
+	add pc,r1		; convert from line no. to line table entry ptr
+	mov altabp-.(r1),r1	; ...
+	bitb #%alstp+%alxon,almode(r1)	; flow control mode on?
+	if ne,<
+	  cmpb #23,r0		; check for ^S for with both parities
+	  beq 1$
+	  cmpb #223,r0
+ifSAO <				; this is for SAO's LA180
+	  beq 1$		; which uses ^Q/^Q protocol
+	  cmpb #21,r0		; look for a ^Q, either parity
+	  beq 1$		; just return if its a ^Q
+	  cmpb #221,r0		; ....
+      >
+	  if eq,<
+1$:	    bisb #%alstp,almode(r1)	; stop output on a ^S
+	    rts r5
+	    >
+	  cmpb #21,r0		; look for a ^Q, either parity
+	  beq 8$		; just return if its a ^Q
+	  cmpb #221,r0		; ....
+	  if eq,<
+8$:	    bicb #%alstp,almode(r1)	; resume after a ^Q
+	    push r4		; save r4
+	    mov (r1),r4		; get device address
+	    bicb alib(r1),4(r4)	; black magic
+	    bisb alib(r1),4(r4)	; enable that lines output interrupts again
+	    pop r4		; restore regs
+	    rts r5
+	    >
+	  >
+	push r0,r1		; INSQ args: character, queue ptr
+	add #aliq,(sp)		; ptr to input queue
+	jsr r5,insq		; insert into input queue
+	pop *			; val: error code
+2$:	rts r5
+
+
+; ALXINT
+
+;	ARGS:				VALS:
+; R1:	line no.			(none)
+
+alxint:	push r0,r4		; save regs
+	asl r1			; times two for indexing
+	add pc,r1		; convert line no. to line table entry ptr
+	mov altabp-.(r1),r1	; ...
+	mov (r1),r4		; get device address
+	bitb #%alstp,almode(r1)	; is this lines output shut off?
+	bne 1$			; pretend we're not waiting for anything
+	push r1			; REMQ arg: queue ptr
+	add #aloq,(sp)		; ...
+	jsr r5,remq		; get character from output queue
+	pop r0,*		; vals: character, error code
+	if eq,<
+	  movb r0,6(r4)		; send character out into the world
+	  >
+	else <			; no character to send
+1$:	  bicb alib(r1),4(r4)	; turn off line's interrupt enable
+	  >
+	pop r4,r0		; restore reg
+	rts r5
+
+.sbttl	Queue management
+
+; QINIT initializes a queue structure.
+
+;	ARGS:				VALS:
+; SP ->	ptr to queue			(none)
+;	buffer size
+;	buffer ptr
+
+qinit:	push r1			; save reg
+	mov 4(sp),r1		; get ptr to queue structure
+	mov 6(sp),qsize(r1)	; save queue buffer size
+	mov 10(sp),qbp(r1)	; set buffer ptr
+	mov 10(sp),qfp(r1)	; set front ptr
+	mov 10(sp),qrp(r1)	; set rear ptr
+	mov 6(sp),qcc(r1)	; set room in queue to size (completely empty)
+	pop r1,4(sp)		; restore reg, move up return r5
+	cmp (sp)+,(sp)+		; pop off args
+	return
+
+
+; ROOMQ waits until a queue has a specified amount of room.
+
+;	ARGS:				VALS:
+; SP ->	queue ptr			(none)
+;	no. of chars
+
+roomq:	push 2(sp)		; TWONHI arg1: address to wait on
+	add #qcc,(sp)		; ...
+	push 4+2(sp)		; TWONHI arg2: value to higher than
+	dec (sp)		; ...
+	call twonhi		; wait for QCC to be ge no. of chars
+	pop (sp),(sp)		; remove args from stack
+	return
+
+
+; INSQ inserts a character into the rear of a queue.
+
+;	ARGS:				VALS:
+; SP ->	queue ptr		 SP ->	error code
+;	character
+
+insq:	push r1			; save reg
+	mfps -(sp)		; save priority
+	mov 6(sp),r1		; ptr to queue structure
+	spl 5			; set no interrupt priority
+	tst qcc(r1)		; room in queue?
+	if eq,<
+	  mov #%eflq,10(sp)	; return queue full error
+	  br 1$
+	  >
+	dec qrp(r1)		; move to next char slot
+	cmp qrp(r1),qbp(r1)	; wrap around to end?
+	if lo,<
+	  add qsize(r1),qrp(r1)	; yes, make ptr to end of buffer
+	  >
+	movb 10(sp),@qrp(r1)	; queue not full, put in this char
+	dec qcc(r1)		; decrement space left in buffer
+	clr 10(sp)		; zero error code for success return
+1$:	mtps (sp)+		; restore priority
+	pop r1,(sp)		; restore reg, pop off arg
+	return
+
+
+; REMW waits for a queue to be non-empty.  After calling REMW a REMQ should
+; never fail.
+
+;	ARGS:				VALS:
+; SP ->	timeout			 SP ->	error code
+;	queue ptr
+
+remw:	push r1			; save reg
+	mov 6(sp),r1		; ptr to queue structure
+	clr 6(sp)		; zero error code
+	tst 4(sp)		; zero timeout?
+	if ne,<
+	  if pl,<		; no timeout if negative time
+	    call uptime		; get system up time
+	    add 4+4(sp),2(sp)	; add timeout to lo order uptime
+	    adc (sp)		; add carry to hi order uptime
+	    call tstot		; set timeout time for wait
+	    >
+	  push r1		; TWONNE arg1: address to wait on
+	  add #qcc,(sp)		; ...
+	  push qsize(r1)	; TWONNE arg2: value to change from
+	  call twonne		; wait for room to be different from size
+	  clr 6(sp)		; set return error code to zero
+	  cmp qcc(r1),qsize(r1)	; timed out?
+	  if eq,<
+	    mov #%eemq,6(sp)	; yes, return queue empty error
+	    >
+	  >
+	pop r1,(sp)		; restore reg, remove arg from stack
+	return
+
+
+; REMQ removes a character from the front of a queue.
+
+;	ARGS:				VALS:
+; SP ->	queue pointer		 SP ->	character
+;					error code
+
+remq:	push (sp),r1		; make room for results, save regs
+	mov 6(sp),r1		; ptr to queue structure
+	cmp qcc(r1),qsize(r1)	; queue empty?
+	if eq,<
+	  mov #%eemq,6(sp)	; return queue empty error
+	  mov #-1,4(sp)		; also return -1 as character
+	  br 1$
+	  >
+	dec qfp(r1)		; move rear ptr to next char
+	cmp qfp(r1),qbp(r1)	; wrap around?
+	if lo,<
+	  add qsize(r1),qfp(r1) ; yes, put ptr at end of buffer
+	  >
+	clr 4(sp)		; so high byte will be clear
+	movb @qfp(r1),4(sp)	; put character in its result slot
+	inc qcc(r1)		; one more space in queue
+	clr 6(sp)		; zero error code for success
+1$:	pop r1			; restore reg
+	return
+
+
+
+.if ne asmpek
+
+; PEEKQ returns the character in front of the queue
+
+;	ARGS:				VALS:
+; SP ->	queue pointer		 SP ->	character
+;					error code
+
+peekq:	push (sp),r1		; make room for results, save regs
+	mov 6(sp),r1		; ptr to queue structure
+	cmp qcc(r1),qsize(r1)	; queue empty?
+	if eq,<
+	  mov #%eemq,6(sp)	; return queue empty error
+	  mov #-1,4(sp)		; also return -1 as character
+	  br 1$
+	  >
+	push qfp(r1)		; save old queue pointer
+	dec qfp(r1)		; move rear ptr to next char
+	cmp qfp(r1),qbp(r1)	; wrap around?
+	if lo,<
+	  add qsize(r1),qfp(r1) ; yes, put ptr at end of buffer
+	  >
+	clr 4+2(sp)		; so high byte will be clear
+	movb @qfp(r1),4+2(sp)	; put character in its result slot
+	pop qfp(r1)		; restore queue pointer
+	clr 6(sp)		; zero error code for success
+1$:	pop r1			; restore reg
+	return
+
+.endc

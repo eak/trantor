@@ -1,0 +1,548 @@
+; -*-palx-*-
+
+.sbttl	console
+
+; console's data structure
+dsect <
+	 .blkb lcs
+cheigh:: .blkw 1		; screen height
+cline::	 .blkw 1		; line number connected to
+cipid::	 .blkw 1		; input process id
+copid::	 .blkw 1		; output process id
+cichar:: .blkw 1		; Console's intercept character
+cimage:: .blkw 1		; using image mode output
+cvpos::	 .blkw 1		; current horizontal position
+chpos::	 .blkw 1		; current vertical position
+ctopt::	 .blkw 1		; terminal's option word
+cofch::	 .blkw 1		; output file channel id
+cifch::  .blkw 1		; input file channel id
+cwait::	 .blkw 1		; time to wait after each character (60th's)
+cwtchr:: .blkw 1		; if non-zero wait after a CR only
+ceschr:: .blkw 1                ; if non-zero last character received
+                                ; was an escape
+ccecho:: .blkw 1		; 0 = we don't need to echo, 1 = we do
+	 >,lcdat
+
+consol:	push #lcdat/2  		; ALOCL arg: size
+	call alocl  		; allocate space for variables
+	pop r1  		; val: ptr
+	mov #lcs/2,r0		; length of command structure
+loop <	  mov (r4)+,(r1)+	; copy into trollr data area
+	  sorl r0
+	  >
+	sub #lcs,r4		; get back ptr to command structure
+	sub #lcs,r1		; ...
+	push r4			; FREE arg: ptr
+	call free		; free command structure
+	mov r1,r4		; use Trollr's version
+	mov r4,filep(r4)	; ptr to FILNAM
+	add #filnam,filep(r4)	; ...
+	push uoch(r4)		; ORDER arg: channel id
+	push #10000+tvmax,#0	; ORDER args: order code, order arg
+	call order		; read TVMAX
+	inc (sp)		; we're one based
+	pop cheigh(r4)		; vals: page height, error code
+	push uoch(r4)		; ORDER arg: channel id
+	push #10000+topt,#0	; ORDER args: order code, order arg
+	call order		; get terminal's option word
+	pop ctopt(r4)		; val: order result (TOPT word for TTY)
+	mov #',cichar(r4)	; set intercept character to ^^
+	clr cofch(r4)		; we're not connected to anything yet
+	clr cwait(r4)		; no waiting on output by default
+	clr cwtchr(r4)		; default to waiting after a CR
+	tdtype clr		; clear screen
+	call getpid		; get our process id
+	pop cipid(r4)		; save as input side process id
+	mov #-1,cline(r4)	; no current connection
+	call moroff		; turn off more processing
+	push r0			; save reg
+	mov pc,r0		; get PIC address of default file name
+	add #crfiln-.,r0	; ....
+	tst (r0)+		; skip over directory
+	mov (r0)+,filnam+2(r4)	; set file name
+	mov (r0)+,filnam+4(r4)	; ....
+	mov (r0)+,filnam+6(r4)	; set extension
+	sub #10,r0		; get back pointer to file name
+	mov (r0)+,filnam+10(r4)	; set default directory
+	mov (r0)+,filnam+12(r4)	; set filename
+	mov (r0)+,filnam+14(r4)	; ....
+	mov (r0)+,filnam+16(r4)	; set extension
+	pop r0			; restore reg
+	br consi		; go do input side
+
+cr4:	.word 0
+
+.sbttl	Input process
+
+consi:	tst cline(r4)		; connected?
+	bmi ccp
+	push uich(r4)		; RCHAR arg: channel id
+	call rchar		; read terminal input
+	pop r0			; val: character
+	cmp r0,cichar(r4)	; Intercept character?
+	beq ccp			; yes, call console command processor
+	push cline(r4),r0	; ALWRIT args: line no., character
+	call alwrit		; output to line
+	tst ccecho(r4)		; are we supposed to echo
+	if ne,<
+	  push uoch(r4),r0	; yes send character to terminal
+	  call wchar		; ....
+	  >
+	br consi
+
+
+; Console command processor
+ccp:   	push uoch(r4)		; ORDER arg: channel id
+	push #10000+tvpos,#0	; ORDER args: order code, order arg
+	call order		; read vertical position
+        inc (sp)		; we're one based
+        pop cvpos(r4)		; val: vpos
+        push uoch(r4)		; ORDER arg: channel id
+        push #10000+thpos,#0	; ORDER args: order code, order arg
+        call order		; read horizontal position
+        inc (sp)		; we're one based
+        pop chpos(r4)		; val: hpos
+        tst cimage(r4)		; using image mode output??
+        if ne,<
+	  push uoch(r4),#3	; ORDER args: channel id, order code,
+	  push #%tcio		;  order arg (cbit to turn off)
+	  call order		; turn off image output mode
+	  pop *			; val: return value (meaningless)
+	  >
+	push cheigh(r4),#1	; CPOSIT args: vpos, hpos
+	call cposit		; move cursor to bottom line
+	push uoch(r4)		; IOAC arg: channel
+	call ioac		; output prompt
+	.string ^"Console:"
+	tdtype eol		; clear to end of line
+	call rdcmdl		; read command line into buffer
+	call rdcmdc		; read 1st character
+	pop r0			; val: character
+	cmp r0,cichar(r4)	; intercept character?
+	if eq,<
+	  tst cline(r4)		; connected to anything?
+	  bmi ccerr		; no, error
+	  push cline(r4),r0	; ALWRIT args: line no., character
+	  call alwrit		; send intercept character
+	  br 3$			; ccdone
+	  >
+	call rrcmdc		; reread the 1st character
+	call sarg		; read string argument
+	push pc			; SCASE arg: ptr to list of string names
+	add #cclist-.,(sp)	; ...
+	call scase		; lookup command typed
+	pop r0,*		; vals: ptr, error code
+	bne ccerr
+	jsr pc,@2(r0)
+3$:	tst errflg(r4)		; error occurred on last command
+	if ne,<
+	  push uoch(r4),errflg(r4)	; WRITEZ args:output channel,asciz ptr
+	  call writez			; print error message
+	  type ^"
+"
+          clr errflg(r4)	; no error now
+	  >
+	jmp ccdone
+
+ccerr:	push uoch(r4),#%tdbel	; WCHAR args: channel id, character
+	call wchar		; feep a loser
+	jmp ccdone
+
+cclist:	.word 4
+	defcom ld,<ld>
+	defcom cques,<?>
+	defcom cexit,<exit>
+	defcom csic,<set_ic>
+	defcom clink,<link>
+	defcom crecve,<receive>
+	defcom cclse,<close>
+	defcom culink,<unlink>
+	defcom clpt,<tpl>
+	defcom csend,<send>
+	defcom ccwait,<wait>
+	defcom csmart,<nasa,mc,multics,its>
+	defcom cdumb,<hp3000>
+;	defcom cmcftp,<mc_ftp>  commentented out because the code doesn't
+;				exist.  TWITS!!!!!  -rll
+	defcom cccCR,<carriage-return>
+	defcom cccCHR,<character>
+	defcom cecho,<echo>
+	defcom cnecho,<noecho>
+	.word 0
+
+cccCR:	clr cwtchr(r4)		; wait only after a CR
+	rts pc
+
+cccCHR:	mov #1,cwtchr(r4)	; wait after each character
+	rts pc
+
+csmart:	jsr pc,cccCHR		; wait after each character
+	mov #2,cwait(r4)	; time to wait
+	rts pc
+
+cdumb:	clr cwtchr(r4)		; wait after CR
+	mov #21,cwait(r4)	; time for HP to catch up
+	rts pc
+
+ccwait: call arg
+	pop *
+	call numarg		; get arg
+	pop cwait(r4)		; got it save as number to wait
+	rts pc
+
+cecho:	mov pc,ccecho(r4)
+	rts pc
+
+cnecho:	clr ccecho(r4)
+	rts pc
+
+csend:	tst cline(r4)		; are we connected
+        bmi ccerr1		; can't send if we're not connected
+	push filep(r4)		; FILARG arg: ptr tofilename buffers
+	call filarg		; read the filename
+	push pc			; ATTACH arg: device
+	add #dskn-.,(sp)	; ....
+	push filep(r4),diskno(r4),#0	; ATTACH args:filename,unit #,cbits
+	call attach		; open specified file
+	pop cifch(r4),r0	; vals: channel id, error code
+	if ne,<
+	  jmp comerr		; report error in opening file
+	  >
+	mov #-1,r2		; default to sending linefeeds
+	clr r3			; default to not echoing
+	call arg		; see if there is another arg
+	pop r0			; get number
+	if ne,<			; if there is an arg
+	  mov #12,r2		; set linefeed flag
+	  >
+        tst cimage(r4)		; using image mode output??
+        if ne,<
+	  push uoch(r4),#2	; ORDER args: channel id, order code,
+	  push #%tcio		; order arg (cbit to turn on)
+	  call order		; turn on image output mode
+	  pop *			; val: return value (meaningless)
+	  >
+loop <	  call quit		; see if user wants to quit sending
+	  pop *			; val: non-zero if time to quit
+	  bne 3$
+	  push cifch(r4)	; RCHAR arg: channel id
+	  call rchar		; get next character
+	  pop r0		; val: character
+	  exitl mi		; EOF????
+	  cmp r0,r2		; destroy all linefeeds!!????
+	  if ne,<
+	    push cline(r4),r0	; ALWRIT args: line no., character
+	    jsr r5,alwrit	; send character
+	    >
+	  tst r0		; is the char we're sending a null
+	  rptl eq		; yes
+	  tst ccecho(r4)	; should we echo
+	  if ne,<		; yes if non-zero
+	    push uoch(r4),r0	; WCHAR args: line no. character
+	    call wchar		; send character to screen
+	    >
+	  tst cwtchr(r4)	; if non-zero then wait after each charcter
+	  if ne,<
+2$:	    push cwait(r4)	; TWFOR arg: time to wait (1/60th's of secs)
+	    call twfor		; wait for other machine to catch up
+	    rptl
+	    >
+	  else <		; if CWTCHR(R4) is zero then wait after a CR
+	    cmp r0,#15		; did we just send a CR?
+	    beq 2$		; yes, wait
+	    rptl		; else do more sending
+	    >
+	  >
+3$:	push cifch(r4)		; DETACH arg: channel id
+	call detach		; close file
+	clr cifch(r4)		; nothing being read
+	rts pc
+
+clpt:	tst cofch(r4)		; anything open
+	bne ccerr1		; yes. report error
+	jsr pc,gettpl		; get the LPT if possible
+	pop cofch(r4),*		; vals: channel id, error code
+	rts pc
+
+ccerr1:	push uoch(r4),#%tdbel	; WCHAR args: channel id, character
+	call wchar		; feep a loser
+	rts pc
+
+crecve:	tst cofch(r4)		; anything open
+	bne ccerr1		; yes. report error
+	push pc			; ATTACH arg1: device name
+	add #dskn-.,(sp)	; ...
+	push filep(r4)		; FILARG arg: pointer to filename buffer
+	call filarg		; set filename (if any)
+	push filep(r4)		; ATTACH arg2: file name
+	push diskno(r4)		; ATTACH arg3: fdisk unit number
+	push #%icrea+%iupd	; ATTACH arg4: cbits
+	call attach		; open write file
+	pop cofch(r4),*		; vals: channel id, error code
+	rts pc
+	
+cclse:	call cclose
+	rts pc
+
+clink:	tst cline(r4)		; connected to anything?
+	bge ccerr1		; yes. error.
+	call numarg		; read numeric argument to link command
+	pop cline(r4)		; val: number
+	push r3,r2		; smashed by CTOTTY
+	jsr pc,ctotty		; get TTYCH table ptr in R3
+	tst r3			; zero R3 means bad link #
+	beq cbadlk		; error take care of it
+	tst pidtb-ttych(r3)	; see if a process owns this terminal
+	bne cbadlk		; not-zero? some other process owns it
+	call getpid		; get our process ID
+	pop pidtb-ttych(r3)	; fill it into process ID table for owning TTY
+	pop r2,r3
+	push pc			; MAKEP arg: initial PC
+	add #conso-.,(sp)	; ...
+	call makep		; create output side of Console
+	pop copid(r4),*		; vals: process id, error code
+	mov r4,cr4		; pass R4 to output process
+	push copid(r4)		; STARTP arg: process id
+	call startp		; start output side
+	pop *			; val: error code
+	mov #-1,cimage(r4)	; default is image mode
+	clr ccecho(r4)		; default is to not echo
+	rts pc
+
+cbadlk:	mov #-1,cline(r4)	; set to unconnected state
+	pop r2,r3		; restore registers
+	br ccerr1		; report error
+
+; CTOTTY gets a pointer to TTYCH table in R3 for CLINE
+; it uses r3 and r2
+
+ctotty:	clr r3			; just for counting up to NTTY's
+	mov pc,r2
+	add #ttab-.,r2		; get PIC address of TTAB
+loop <	  cmp cline(r4),tlinen(r2)	; is this the right line #?
+	  exitl eq
+	  add #lttab,r2
+	  inc r3
+	  cmp #ntty,r3
+	  blo 1$
+	  rptl
+	  >
+        asl r3			; TTY #, convert for word address
+	add pc,r3		; pointer to TTYCH table
+	add #ttych-.,r3
+	rts pc
+1$:	clr r3
+	rts pc
+
+cques:	push uoch(r4),#%tdclr	; WCHAR args: channel id, character
+	call wchar		; clear screen
+	push pc			; LISTC arg: ptr to command list
+	add #cclist-.,(sp)	; ...
+	call listc		; typeout Console commands
+	rts pc
+
+
+csic:	call arg		; skip over spaces
+	pop *			; val: character
+	call rdcmdc		; read new intercept character
+	pop cichar(r4)		; val: character
+	rts pc
+
+
+ccdone:	push cheigh(r4),#1	; CPOSIT args: vpos, hpos
+	jsr r5,cposit		; move to beginning of bottom line
+	push uoch(r4),#%tdeol	; WCHAR args: channel id, character
+	call wchar		; clear bottom line
+        push cvpos(r4),chpos(r4) ; CPOSIT args: vpos, hpos
+        call cposit		; restore cursor to where it was
+	tst cimage(r4)		; image mode output??
+	if ne,<
+	  push uoch(r4),#2	; ORDER args: channel id, order code,
+	  push #%tcio		;  order arg (cbit to turn on)
+	  call order		; turn on image output mode
+	  pop *			; val: return value (meaningless)
+	  >
+	jmp consi
+
+
+cfree:	tst copid(r4)		; any output process?
+	if ne,<			; yes, flush it
+	  push copid(r4)	; STOPP arg: process id
+	  call stopp		; stop output process
+	  pop *			; val: error code
+	  push copid(r4)	; KILLP arg: process id
+	  call killp		; kill output process
+	  pop *			; val: error code
+	  >
+	call cclose		; close any output file
+	tst cline(r4)
+	if ge,<
+	  push r3,r2		; free the TTY in PIDTB
+	  jsr pc,ctotty
+	  tst r3
+	  if ne,<
+	    clr pidtb-ttych(r3)	; free it
+	    >
+	  pop r2,r3
+	  >
+	return
+
+cexit:  tst cline(r4)		; are we connected
+	if ge,<			; yes
+	  call cbufrt		; reset buffers
+	  >
+	push uoch(r4)		; ORDER arg: channel id
+	push #20000+topt,ctopt(r4)	; ORDER arg: order code, order arg
+	call order		; restore terminal options
+	pop *			; val: meaningless
+	call cfree
+        call moron		; turn on more processing
+	push #lcs/2		; ALOCL arg: size
+	call alocl		; allocate command structure
+	pop r1			; val: ptr
+	mov #lcs/2,r0		; no. of words in command structure
+loop <	  mov (r4)+,(r1)+	; copy TROLLR's command stuff
+	  sorl r0		; ...
+	  >
+	sub #lcs,r1		; get back ptrs to start of data blocks
+	sub #lcs,r4		; ...
+	push r4			; FREE arg: ptr
+	call free		; free Trollr's data block
+	mov r1,r4		; set command structure ptr
+	mov r4,filep(r4)	; ptr to FILNAM
+	add #filnam,filep(r4)	; ...
+	pop *			; remove return PC from stack
+	rts pc
+
+.if ne 0			; don't assemble this code for now
+cdisp:	push uoch(r4),#%tdclr	; WCHAR args: channel id,character
+	call wchar		; clear screen
+	push uoch(r4)		; IOAC arg: output channel
+	tst cimage(r4)		; what type of output processing is happening
+        if eq,<
+	   call ioac		; output message
+	  .string ^"No image output.
+"
+          >
+	else <
+	  call ioac		; output message
+	  .string ^"Image Output.
+"
+          >
+	cmp #-1,cline(r4)	; are we connected to anything??
+	if eq,<
+	  push uoch(r4)		; IOAC arg: output channel
+	  call ioac		; print message
+	  .string ^"Not connected.
+"
+          >
+	else <
+          push cline(r4),uoch(r4)	; IOAC args: argument, output channel
+          call ioac		; output message
+          .string ^"Connected to  ^d.
+"
+          >
+        push uoch(r4)		; IOAC arg: output channel
+	tst cofch(r4)		; output channel open ???
+	if ne,<
+	  call ioac		; output message
+	  .string ^"Output file is open.
+"
+          >
+	else <
+	  call ioac		; output message
+	  .string ^"No output file is open.
+"
+          >
+        push uoch(r4)		; IOAC arg: output channel
+	tst ccecho(r4)		; are we echoing????
+	if ne,<
+	  call ioac
+	  .string ^"Half-duplex (echoing enabled).
+"
+          >
+	else <
+          call ioac
+	  .string ^"Full-duplex (echoing disabled).
+"
+          >
+	rts pc
+.endc
+
+culink: tst cline(r4)		; are we connected
+	if ge,<
+          call cfree		; free up output channels and
+				; kill output process
+          call cbufrt		; reset buffers for cline
+	  >
+        mov #-1,cline(r4)	; not connected to anything any more
+	clr cofch(r4)		; no output file either
+	rts pc			; return to console command processor
+
+cbufrt: push cline(r4),#20.,#60.	; ALREBF args: line #,input,output size
+	call alrebf		; reset line buffers
+	pop *			; VALS: error code
+	return
+
+
+; CPOSIT moves the terminal's cursor to the specified place.
+
+;	ARGS:				VALS:
+; SP ->	horizontal position		(none)
+;	vertical position
+
+cposit:	bit #%todis,ctopt(r4)	; display terminal?
+	if eq,<			; no
+	  push uoch(r4),#%tdhmv	; WCHAR args: channel id, character
+	  call wchar			; send code for horizontal move
+	  push uoch(r4),2+2(sp)	; WCHAR args: channel id, character
+	  call wchar			; send code for vertical move
+	  br 1$
+	  >
+	push uoch(r4),#%tdmov	; WCHAR args: channel id, character
+	call wchar		; send software TTY code for cursor move
+	push uoch(r4),4+2(sp)	; WCHAR args: channel id, character
+	call wchar		; send vertical position
+	push uoch(r4),2+2(sp)	; WCHAR args: channel id, character
+	call wchar		; send horizontal position
+1$:	pop (sp),(sp)		; remove args from stack
+	rts r5
+
+.sbttl	Output process
+
+conso:	push #0,#80.		; SETSS args: process id, size
+	call setss		; enlarge our stack
+	pop *			; val: error code
+	if ne,<
+	  lose 0
+	  >
+	mov cr4,r4		; get ptr to Console's data area
+	push cline(r4),#750.	; ALREBF args: line no., input buffer size
+	push #20.		; output buffer size
+	call alrebf		; re allocate buffers
+	pop *			; val: error code
+coloop:	push cline(r4),#-1	; ALREAD args: line no., timeout (none)
+	call alread		; read input from line 
+	pop r0,*		; vals: character, error code
+	push uoch(r4),r0	; WCHAR args: channel id, character
+	call wchar		; output to terminal
+	tst cofch(r4)		; output file open?
+	beq coloop		; no
+	bic #177600,r0		; hack bits
+	beq coloop		; don't write nulls to output file
+	push cofch(r4),r0	; WCHAR args: channel id, character
+	call wchar		; output to file
+	br coloop
+
+
+cclose:	tst cofch(r4)		; anything open?
+	if ne,<
+	  push cofch(r4)	; DETACH arg: channel id
+	  call detach		; close file
+	  clr cofch(r4)		; indicate nothing open
+	  >
+	rts r5
+
+crfiln:	.rad50 "CONSOL"
+	.rad50 "OUT"
+

@@ -1,0 +1,9 @@
+
+The structure of Asynchronous LINEs and TTY need to be changed to
+be more efficient.
+
+Memory Management needs to be implemented.
+
+A CHAOS NCP needs to be written and incorporated into TRANTOR
+after memory management is done.
+

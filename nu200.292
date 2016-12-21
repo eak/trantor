@@ -1,0 +1,1529 @@
+; User200 simulator for PDP11   -*-PALX-*-
+u2vn==%fnam2
+
+
+.sbttl	Definitions
+
+; Message codes.
+usom==001			; start of message
+ueom==003			; end of message
+usit==160			; site code
+urea==023			; read
+uack==006			; acknowledge
+urej==030			; reject
+uerr==025			; error
+uesc==076			; escape code
+ue1==102			; E1
+ue2==040			; E2
+ue3==041			; E3
+
+
+; User200 table definition.
+dsect <
+	 .blkb lcs		; room for command structure
+utrmln:: .blkw 1		; saved width of users terminal
+udpfl::	 .blkw 1		; nonzero if DP11
+ucsra::	 .blkw 1		; address of DP11/DU11
+usts::	 .blkw 1		; status word
+ursw::	 .blkw 1		; receive co-routine PC
+ussw::	 .blkw 1		; send co-routine PC
+umbp::	 .blkw 1		; ptr to message buffer
+ulbp::	 .blkw 1		; ptr to LPT buffer
+urmp::	 .blkw 1		; receiver message ptr
+urcc::	 .blkw 1		; receiver character count
+urcs::	 .blkw 1		; receiver checksum
+uxmp::	 .blkw 1		; xmtr message ptr
+uxcc::	 .blkw 1		; xmtr character count
+uxcs::	 .blkw 1		; xmtr ckecksum
+urmc::	 .blkw 1		; read message count
+unwrit:: .blkw 1		; no. of write messages received
+usta::	 .blkw 1		; station address of last message
+ucode::	 .blkw 1		; message code of last message
+uecode:: .blkw 1		; E1, E2 or E3 from last message
+uwsta::	 .blkw 1		; station address of last write
+uosta::	 .blkw 1		; station address for next output
+uocode:: .blkw 1		; control code for next output
+uoecod:: .blkw 1		; E1, E2 or E3 for next message
+uhpid::	 .blkw 1		; process id of handler process
+uscrpq:: .blkb lq		; script queue structure
+ulof::	 .blkw 1		; LPT output flag
+udof::	 .blkw 1		; display output flag
+uosw::	 .blkw 1		; output co-routine PC
+ueof::	 .blkw 1		; echo output flag
+upbf::	 .blkw 1		; poll beep flag
+ueif::	 .blkw 1		; echo input flag
+ucwt::	 .blkw 1		; says whether clear_write should really clear
+udmf::	 .blkw 1		; debugging messages flag (transmitter)
+urdmf::	 .blkw 1		; debugging messages flag (receiver)
+ulpch::	 .blkw 1		; LPT channel id
+ucrch::	 .blkw 1		; Card Reader channel id
+ucomp::	 .blkw 1		; computer that u200 is talking to
+%upar::	 .blkw 1		; parity errors
+%ucar::	 .blkw 1		; carier loss
+%ufrm::	 .blkw 1		; framing error
+%uovr::  .blkw 1		; overrun error
+ueff::	 .blkw 1		; form feeds allowed
+ucbuf::	 .blkb 80.		; command buffer, input is copied here
+ucbfln:: .blkw 1		; length of command buffer
+	>,lutbl
+
+; USTS bits
+%urbsy==1			; receiver busy, i.e. received site code
+%umsg==2			; message in buffer (reject all incoming msgs)
+%usndw==4			; waiting to send a message
+%uint==10			; interrupt CDC computer
+%usui==20			; user input waiting to be sent
+%usrm==40			; read message waiting to be sent
+
+
+.if ne  ndp*ndu
+
+.macro	ifdp code
+	tst udpfl(r4)
+	if ne,<code>
+.endm
+
+.macro	ifdu code
+	tst udpfl(r4)
+	if eq,<code>
+.endm
+
+.iff
+
+  .if eq  ndp
+      .macro	ifdp code
+      .endm
+      .macro	ifdu code
+		code
+      .endm
+  .iff
+      .macro	ifdp code
+		code
+      .endm
+      .macro	ifdu code
+      .endm
+  .endc
+
+.endc
+
+.sbttl	User200 Initialization
+
+; This is the U200 command.
+
+u200:   push #0,#80.		; SETSS args: process id, size
+	call setss		; get us a large stack
+	pop *			; val: error code
+	if ne,<
+	  lose 0
+	  >
+; allocate UTBL (storage block for User200 simulator)
+	push #lutbl/2,#60.	; ALOCW arg: size of block, timeout
+	call alocw		; allocate UTBL
+	pop r1,r0  		; val: ptr
+	if ne,<
+	  jmp comerr		; go handle error
+	  >
+	mov #lcs/2,r0		; length of command structure
+loop <	  mov (r4)+,(r1)+	; copy into UTBL
+	  sorl r0
+	  >
+	sub #lcs,r4		; get back ptr to command structure
+	sub #lcs,r1		; ...
+	push r4			; FREE arg: ptr
+	call free		; free command structure
+	mov r1,r4		; use User200's version
+	mov r4,filep(r4)	; ptr to FILNAM
+	add #filnam,filep(r4)	; ...
+	clr ucomp(r4)		; default computer is NCAR
+	call moroff		; turn off more processing
+;	push uoch(r4)		; ORDER arg: channel id
+;	push #10000+tvmax,#0	; ORDER args: order code, order arg
+;	call order		; read page height
+;	pop *			; val: page height
+;	bgt 1$
+;	err ^"U200 only works on display terminals."
+;	jmp uex1
+
+; Assign a DP11 or DU11.
+
+1$:	push r4			; SYNASN arg: ptr to data block
+	call synasn		; get a synchrounous interface (DP or DU),
+	pop udpfl(r4)		; val: DP/DU flag
+	pop ucsra(r4)		; val: CSR address of DP or DU
+	pop r0			; val: error code
+	beq 2$
+	jmp usuer1		; hack error if any
+
+; Allocate message buffer.
+
+2$:	push #<1039.+1>/2,#60.	; ALOCW args: size of block, timeout
+	call alocw		; allocate buffer for receiving messages
+	pop umbp(r4),r0		; save ptr in UTBL
+	bne usuer1		; go hack error if any
+
+; Allocate LPT buffer.
+
+	push #<1039.+1>/2,#60.	; ALOCW args: size of block, timeout
+	call alocw		; allocate buffer for receiving messages
+	pop ulbp(r4),r0		; save ptr in UTBL
+	bne usuer1		; go hack error if any
+
+; Allocate script buffer.
+
+	push #200./2,#60.	; ALOCW args: size of block, timeout
+	call alocw		; allocate buffer for scripting
+	pop r1,r0		; vals: ptr to block, error code
+	bne usuer1		; go hack error if any
+	push r1,#200.,r4	; QINIT args: buffer ptr, buffer size, queue
+	add #uscrpq,(sp)	; ptr
+	call qinit		; initialize queue structure
+
+; Setup LPT and CR channels.
+
+	call ulatt		; attach LPT if possible
+	clr ucrch(r4)		; no CR specified yet
+
+; Create handler process
+
+	mov r4,uhr4		; pass R4 to handler process
+	push pc			; MAKEP arg: initial PC
+	add #uhandl-.,(sp)	; ...
+	call makep		; create User200 handler process
+	pop uhpid(r4),r0	; vals: process id, error code
+	bne usuer1
+	push uhpid(r4)		; STARTP arg: process id
+	call startp		; start the handler process
+	pop r0			; val: error code
+	bne usuer1
+
+; Setup receiver co-routine.
+
+	mov pc,ueif(r4)		; turn on input echoing
+	mov pc,ueof(r4)		; turn on output echoing
+	mov pc,upbf(r4)		; turn on poll beeping
+	mov pc,ucwt(r4)		; turn off clear write screen clearing
+	mov pc,%upar(r4)
+	mov pc,%ucar(r4)
+	mov pc,%uovr(r4)
+	mov pc,%ufrm(r4)
+	clr ueff(r4)		; no form feeds in output by default
+	clr udmf(r4)		; turn on debugging messages
+	mov ucsra(r4),r1	; get address of DP11/DU11
+	spl 5			; high priority to setup
+	jsr pc,urcv		; initiate reception
+	pop ursw(r4)		; ...
+	spl 0			; restore pr0
+	push uoch(r4)		; WRITEC arg: channel id
+	call writec		; print greeting message
+	  .string ^"User200 in operation
+"
+	push uoch(r4)		; ORDER arg: channel id
+	push #2,#%tcnctn	; ORDER args: order code, order arg
+	call order		; BIS into cbits, turn off line continuation
+	pop *			; val: order val
+	push uoch(r4)		; ORDER arg: channel id
+	push #10000+thmax,#0	; ORDER args: order code, order arg
+	call order		; read width of terminal
+	pop utrmln(r4)		; val: term width, save for later
+	push uoch(r4)		; ORDER arg: channel id
+	push #20000+thmax,#79.	; ORDER args: order code, order arg
+	call order		; make terminal line length 79 cloumns
+	pop *			; val: meaningless
+	br ucoml		; enter User200 command loop
+
+usuer1: br usuerr		; this is here for range
+
+; Attach LPT as User200 output device.
+ulatt:	jsr pc,gettpl		; try to get the TPL if possible
+	pop ulpch(r4),r0	; vals: channel id, error code
+	if ne,<
+	  push r0		; IOA arg: error code
+	  push uoch(r4)		; IOA arg: channel id
+	  call ioac
+	    .string ^"Can't get LPT - ^e
+"
+	  >
+	return
+
+
+; Handle error in User200 startup.  R0 contains error code.
+usuerr:	push r0			; IOA arg: error code
+	push uoch(r4)		; IOA arg: channel id
+	call ioac
+	  .string ^"Error in User200 startup - ^e
+"
+	jmp uex1
+
+.sbttl	User200 command processor
+
+ucoml:	call rdcmdl		; read command line into command input buffer
+	call rdcmdc		; get first character
+	cmpb (sp)+,#'@		; input data or command?
+	bne uidata
+; Interpret input line as simulator command
+	call sarg		; read a string argument
+				; SCASE args: ptr, length
+	push pc			; SCASE arg3: ptr to list of strings
+	add #uclist-.,(sp)	; ...
+	call scase		; lookup command name in list
+	pop r1,*		; vals: ptr to entry, error code
+	if ne,<
+	  err ^"Illegal command"
+	  br 1$
+	  >
+	jsr pc,@2(r1)		; call routine for this command
+	tst errflg(r4) 		; error message to print?
+	if ne,<
+1$:	  push uoch(r4),errflg(r4) 	; WRITEZ args: channel, asciz ptr
+	  call writez 		; print error message
+	  type ^"
+"
+	  clr errflg(r4) 	; clear error flag
+	  >
+	br ucoml
+
+; Send whole input line to CDC computer.
+uidata:	call rrcmdc		; reread the first character (the non-@).
+	mov r4,r3		; ptr to UCBUF
+	add #ucbuf,r3		; ...
+	mov #80.,r2		; size of UCBUF
+loop <	  call rdcmdc		; get character from command line
+	  movb (sp)+,r0		; RDCMDC val: character
+	  exitl eq
+	  cmp r0,#40		; control character?
+	  rptl lo		; yes, ignore
+	  add pc,r0			; translate from ASCII to CDC code
+	  movb uactab-40-.(r0),r0	; ... 
+	  rptl eq		; ignore character if translation is zero
+	  movb r0,(r3)+		; put character into UCBUF
+1$:	  sorl r2
+	  >
+	tst ucomp(r4)		; are we talking to NCAR or a CDC computer
+	if ne,<
+	  mov #80.,ucbfln(r4)	; calculate the length of message
+	  sub r2,ucbfln(r4)	; for the CDC computer
+	  >
+	else <
+	  mov #80.,ucbfln(r4)	; send 80 characters to NCAR
+	  call upad		; pad out rest of line with spaces
+	  >
+	bis #%usui,usts(r4)	; indicate there's user input to send
+	br ucoml		; process more user input
+
+
+; List of User200 simulator commands.
+uclist:	.word 4			; no. of bytes per entry
+	defcom shutdn,<shutdown>
+	defcom nshtdn,<stayup>
+	defcom uother,<cdc>
+	defcom uncar,<ncar>
+.lif ne asmtrl
+	defcom utroll,<trollr>
+	defcom uexit,<exit,bye>
+	defcom ureadf,<read>
+	defcom uwritf,<write>
+	defcom ucr,<close_read,cr>
+	defcom ucw,<close_write,cw>
+	defcom uenabl,<enable>
+	defcom udisab,<disable>
+	defcom uff,<ff>
+	defcom uint,<i>
+	defcom udial,<dial>
+	defcom uhang,<hangup>
+	defcom ulistc,<?>
+	defcom ld,<ld>
+	.word 0			; terminator
+
+; ROCHESTER tell PDP11 that U200 is talking to regular CDC computer.
+uother: mov pc,ucomp(r4)
+	rts pc
+
+; NCAR tells the PDP11 that U200 is talking to  NCAR (which is a nicer CDC)
+uncar:	clr ucomp(r4)
+	rts pc
+
+; READ command - open User200 card reader input file.
+ureadf:	tst ucrch(r4)		; card reader file open?
+	if ne,<			; yes
+	  push ucrch(r4)	; DETACH arg: channel id
+	  clr ucrch(r4)		; zero channel id so don't try to use
+	  call detach		; close previous card reader file first
+	  >
+	push filep(r4)		; FILARG arg: ptr to filename buffer
+	call filarg		; read a filename argument
+	push pc			; ATTACH arg1: device name
+	add #dskn-.,(sp)	; ...
+	push filep(r4)		; ATTACH arg2: filename
+	push diskno(r4),#0	; ATTACH args 3 and 4: disk unit #,cbits
+	call attach		; open card reader file
+	pop ucrch(r4),r0	; vals: channel id, error code
+	if ne,<
+	  jmp comerr		; handle open error
+	  >
+	rts pc
+
+
+; WRITE command - open User200 output file.
+uwritf:	tst ulpch(r4)		; LPT file open?
+	if ne,<			; yes
+	  push ulpch(r4)	; DETACH arg: channel id
+	  clr ulpch(r4)		; zero channel id so don't try to use
+	  call detach		; close previous output file first
+	  >
+	call arg		; see if argument to write command
+	pop *			; val: character
+	if eq,<			; no argument
+	  call ulatt		; get LPT
+	  rts pc
+	  >
+	push filep(r4)		; FILARG arg: ptr to filename buffer
+	call filarg		; read a filename argument
+	push pc			; ATTACH arg1: device name
+	add #dskn-.,(sp)	; ...
+	push filep(r4)		; ATTACH arg2:  filename
+	push diskno(r4),#%icrea+%iupd	; ATTACH args 3 and 4:disk unit #,cbits
+	call attach		; open LPT output file
+	pop ulpch(r4),r0	; vals: channel id, error code
+	if ne,<
+	  jmp comerr		; handle open error
+	  >
+	rts pc
+
+
+; CLOSE_READ or CR command - close User200 card reader input file.
+ucr:	tst ucrch(r4)		; card reader file open?
+	if ne,<
+	  push ucrch(r4)	; DETACH arg: channel id
+	  clr ucrch(r4)		; zero channel id so don't try to use
+	  call detach		; close card reader file
+	  >
+	rts pc
+
+
+; CLOSE_WRITE or CW command - close User200 LPT output file.
+ucw:	tst ulpch(r4)		; LPT output file open?
+	if ne,<
+	  push ulpch(r4)	; DETACH arg: channel id
+	  clr ulpch(r4)		; zero channel id so don't try to use
+	  call detach		; close LPT output file
+	  >
+	rts pc
+
+
+; ENABLE command.
+uenabl:	call arg		; skip spaces until next argument
+	pop *			; val: character
+	call sarg		; read string argument
+				; SARG vals: length, ptr
+	push pc			; SCASE arg: ptr to list of options
+	add #uopts-.,(sp)	; ...
+	call scase		; lookup argument in table
+	pop r1,*		; vals: ptr, error code
+	bne ued1
+	mov r4,-(sp)		; get address of flag by adding offset
+	add 2(r1),(sp)		; from UOPTS to UTBL ptr in R4
+	mov #1,@(sp)+		; set flag
+	rts pc
+
+
+; DISABLE command.
+udisab:	call arg		; skip spaces until next argument
+	pop *			; val: character
+	call sarg		; read string argument
+				; SARG vals: length, ptr
+	push pc			; SCASE arg: ptr to list of options
+	add #uopts-.,(sp)	; ...
+	call scase		; lookup argument in table
+	pop r1,r0		; vals: ptr, error code
+	bne ued1
+	mov r4,-(sp)		; get address of flag by adding offset
+	add 2(r1),(sp)		; from UOPTS to UTBL ptr in R4
+	clr @(sp)+		; clear flag
+	rts pc
+
+
+ued1:	push uoch(r4)		; WRITEC arg: channel id
+	call writec
+	  .string ^"Unrecognized option.  Valid option names are:
+"
+	push pc			; LISTC arg: ptr to table
+	add #uopts-.,(sp)	; ...
+	call listc
+	rts pc
+
+
+.macro	defopt a,names
+	.irp n,<names>
+	  .string ^"n",%.ctmp
+	  .word %.ctmp,a
+	  .endm
+.endm defopt
+
+uopts:	.word 4			; no. of bytes per entry
+	defopt ueif,<input_echoing,ie>
+	defopt ueof,<output_echoing,oe>
+	defopt upbf,<poll_beeps,pb>
+	defopt udmf,<debugging_transmitter,dt>
+	defopt urdmf,<debugging_receiver,dr>
+	defopt ucwt,<clear_writes,cw>
+	defopt %upar,<parity>
+	defopt %ucar,<carrier>
+	defopt %ufrm,<framing>
+	defopt %uovr,<overrun>
+	defopt ueff,<form_feed>
+	.word 0			; terminator
+
+
+; FF command - form feed LPT.
+uff:	tst ulpch(r4)		; LPT open?
+	if ne,<
+	  push ulpch(r4),#14	; WCHAR args: channel id, character
+	  call wchar		; output form feed to LPT
+	  >
+	rts pc
+
+
+; I command - interrupt CDC computer.
+uint:	bis #%uint,usts(r4)
+	rts pc
+
+
+; DIAL command - dial the phone.
+udial:	mov ucsra(r4),r1	; get address of DP/DU
+	ifdp <
+	  bit #10000,4(r1)	; dataset ready?
+	  bne 1$		; yes, must hangup first
+	  >
+	ifdu <
+	  bit #1000,(r1)	; dataset ready?
+	  bne 1$		; yes, must hangup first
+	  >
+	ifdp <
+	  bic #1,4(r1)		; turn off before on
+	  bis #1,4(r1)		; turn on data terminal ready
+	  >
+	ifdu <
+	  bic #2,(r1)		; turn off befor on
+	  bis #2,(r1)		; turn on data terminal ready
+	  >
+	push uoch(r4)		; WRITEC arg: channel id
+	call writec		; explain command not yet implemented
+	  .string ^"Works for 2000 baud only.
+"
+        push #3			; ALWRIZ arg: line no.
+	call alwriz		; call the 2000 baud phone number
+	  .litrl <
+	    .byte 2
+	    .ascii "9;13034994334"   ; NCAR 2000 baud phone number
+	    .byte 74,77,3,0
+	    >
+	rts pc
+
+1$:	push uoch(r4)		; WRITEC arg: channel id
+	call writec		; tell loser that he must hangup first
+	  .string ^"Hangup first
+"
+	rts pc
+
+
+; HANGUP command - hangup the phone.
+uhang:	mov ucsra(r4),r1	; get address of DP11/DU11
+	ifdp <
+	  bic #1,4(r1)		; turn off data terminal ready to hangup
+	  >
+	ifdu <
+	  bic #2,(r1)		; turn off data terminal ready to hangup
+	  >
+	rts pc
+
+
+; ? command - list User200 commands.
+ulistc:	push pc			; LISTC arg: ptr to command list
+	add #uclist-.,(sp)	; ...
+	call listc		; typeout list of commands
+	rts pc
+
+.sbttl	User200 exit
+
+.if ne  asmtrl
+utroll:	call uex2		; clean up from a U200
+	pop *			; remove return PC from stack
+	jmp trollr		; start a TROLLR
+.endc
+
+uexit:	mov ucsra(r4),r1	; get address of DP11/DU11
+ifSAO <
+	ifdp <			; SAO wants EXIT to do a Hangup
+	  bic #1,4(r1)		; hangup this line
+	  >
+	ifdu <
+	  bic #2,(r1)		; hangup this line
+	  >
+	beq uex0		; exit U200 now
+      >
+ifMIT <
+	ifdp <
+	  bit #10000,4(r1)	; dataset ready?
+	  beq uex0		; no, ok to exit
+	  >
+	ifdu <
+	  bit #1000,(r1)	; dataset ready?
+	  beq uex0		; no, ok to exit
+	  >
+	push uoch(r4)		; WRITEC arg: channel id
+	call writec		; tell loser to hangup
+	  .string ^"Hangup first
+"
+	rts pc
+      >
+
+uex0:	push uoch(r4)		; ORDER arg: channel id
+	push #3,#%tcnctn	; ORDER args: order code, order arg
+	call order		; BIC into cbits: turn on line continuation
+	pop *			; val: order val
+	push uoch(r4)		; ORDER arg: channel id
+	push #20000+thmax,utrmln(r4)	; ORDER args: order code, order arg
+	call order		; set terminal line length back
+	pop *			; val: meaningless
+	pop *			; remove return PC from stack
+
+; The startup code jumps here on startup errors.
+uex1:   call uex2		; cleanup from a U200
+	rts pc
+
+uex2:	tst ucsra(r4)		; DP11/DU11 assigned?
+	if ne,<
+	  push r4		; SYNDEA arg: ptr to data structure
+	  call syndea		; give back DP11/DU11
+	  >
+	tst uhpid(r4)		; handler process?
+	if ne,<
+	  push uhpid(r4)	; STOPP arg: process id
+	  call stopp		; stop handler process
+	  pop *			; val: error code
+	  push uhpid(r4)	; KILLP arg: process id
+	  call killp		; kill handler process
+	  pop *			; val: error code
+	  >
+	tst ucrch(r4)		; card reader channel?
+	if ne,<
+	  push ucrch(r4)	; DETACH arg: channel id
+	  call detach		; close input file
+	  >
+	tst ulpch(r4)		; LPT channel?
+	if ne,<
+	  push ulpch(r4)	; DETACH arg: channel id
+	  call detach		; close output file
+	  >
+	tst uscrpq+qbp(r4)	; scripting queue?
+	if ne,<
+	  push uscrpq+qbp(r4)	; FREE arg: ptr to block
+	  call free		; free scripting buffer
+	  >
+	tst umbp(r4)		; message buffer?
+	if ne,<
+	  push umbp(r4)		; FREE arg: ptr to block
+	  call free		; deallocate the message buffer
+	  >
+	tst ulbp(r4)		; message buffer?
+	if ne,<
+	  push ulbp(r4)		; FREE arg: ptr to block
+	  call free		; deallocate the message buffer
+	  >
+	call moron		; turn on more processing
+	push #lcs/2		; ALOCL arg: size
+	call alocl		; allocate command structure
+	pop r1			; val: ptr
+	mov #lcs/2,r0		; no. of words in command structure
+loop <	  mov (r4)+,(r1)+	; copy User200's command stuff
+	  sorl r0		; ...
+	  >
+	sub #lcs,r1		; get back ptrs to start of data blocks
+	sub #lcs,r4		; ...
+	push r4			; FREE arg: ptr
+	call free		; free User200's data block
+	mov r1,r4		; set command structure ptr
+	mov r4,filep(r4)	; ptr to FILNAM
+	add #filnam,filep(r4)	; ...
+	return
+
+
+.sbttl	User200 interrupt handlers
+
+; User200 Clear to Send interrupt handler
+ucts:	bit #%usndw,usts(r4)	; CTS should only be asserted during XMT
+	beq 1$			; if not during XMT, ignore the interrupt
+	jsr pc,@ussw(r4)	; call send co-routine
+	pop ussw(r4)		; save co-routine PC
+1$:	jmp dpuret
+
+; User200 transmitter ready handler.
+uxrdy:	jsr pc,@ussw(r4)	; call send co-routine
+	pop ussw(r4)		; save co-routine PC
+	xor r0,uxcs(r4)		; keep checksum of stuff sent
+	ifdp <
+	  .if ne 1
+1$:	    tstb 4(r1)		; xmtr ready?
+	    bpl 1$
+	    movb partab(r0),6(r1)	; send character
+	    br uxrdy
+	  .endc
+	  movb partab(r0),6(r1)	; send character
+	  >
+	ifdu <
+	  movb r0,6(r1)		; send character (DU11 computes parity bit)
+	  >
+	jmp dpuret
+
+
+; User200 character received handler.
+urchar:	bic #177600,r0		; clear random bits
+	xor r0,urcs(r4)		; keep checksum
+	jsr pc,@ursw(r4)	; call receiver co-routine
+	pop ursw(r4)		; save co-routine PC
+	jmp dpuret
+
+
+; User200 receiver error handlers.  Come here on parity error, receiver
+; overrun, or on losing carrier.
+unocar: tst %ucar(r4)
+	if ne,<
+	  bit #%urbsy,usts(r4)	; were we in midst of recieving?
+	  beq urerr1		; its not an error if we weren't recieving
+	  call usstrc
+	    .string ^"Lost Carrier  "
+	  br urerr
+	  >
+	br urerr1
+urpare: call usstrc		; put message in script queue
+	 .string ^"Parity Error "
+	br urerr
+urover:	call usstrc
+	 .string ^"Overrun Error "	
+	br urerr
+urfrme:	call usstrc
+	 .string ^"Framing Error "
+
+urerr:  push urcc(r4)		; type # of chars recieved thus far
+	call usonum
+	bit #%urbsy,usts(r4)	; receiving a message?
+	if ne,<
+	  jsr r5,userr		; yes, send error reply
+	  >
+	jsr pc,urcv		; initiate reception again
+	pop ursw(r4)		; ...
+urerr1:	jmp dpuret
+
+.sbttl	Transmitter co-routine
+
+; User200 transmitter co-routine.  Setup initially by
+;	JSR PC,UXMT
+;	POP USSW(R4)
+
+
+uxmt:	tst udmf(r4)		; debugging?
+	if ne,<
+	  push #'(		; put ( in the script buffer
+	  call uschar		; print it
+	  >
+	bis #%usndw,usts(r4)	; waiting to send a message
+	ifdp <
+	  mov #2,(r1)		; stop receiver, i.e. set only half duplex
+	  mov #343,4(r1)	; turn on done, interrupt enable, idle sync
+	  >
+.if ne 1
+	ifdu <
+	  mov #6,(r1)		; stop receiver, turn on data terminal ready,
+				; and request to send
+	  mov #30,4(r1)		; turn on half duplex, send,
+  loop <    bit #20000,(r1)	; test for Clear to Send
+	    exitl ne		; if we've got it, try to xmit chars..
+	    bis #40,(r1)	; if not, enable "state change" interrupt
+	    jsr pc,@(sp)+	; wait for Clear to Send
+	    rptl
+	    >
+	  bic #40,(r1)		; shut off "state change" interrupt
+	  bis #100,4(r1)	; enable transmitter interrupts
+	  >
+.iff
+	ifdu <
+	  mov #6,(r1)		; stop receiver, turn on data terminal ready,
+				; and request to send
+	  mov #130,4(r1)	; turn on half duplex, send, and enable
+				; transmitter interrupts
+  loop <    bit #20000,(r1)	; wait for clear to send
+	    rptl eq		; ...
+	    >
+	  >
+.endc
+.rept 4
+	jsr pc,@(sp)+		; wait for xmtr ready
+	mov #26,r0		; send sync
+	call uxscrp		; possibly script it
+.endr
+	jsr pc,@(sp)+
+	mov #177,uxcs(r4)	; initialize checksum
+	mov #usom,r0		; send start of message code
+	call uxscrp		; possibly script it
+	jsr pc,@(sp)+
+	mov #usit,r0		; send site code
+	call uxscrp		; possibly script it
+	jsr pc,@(sp)+
+	mov uosta(r4),r0	; send station address
+	call uxscrp		; possibly script it
+	jsr pc,@(sp)+
+	mov uocode(r4),r0	; get control code (READ, ACK, REJ, or ERR)
+	call uxscrp		; possibly script it
+	cmp r0,#urea		; read message?
+	if ne,<			; no, must be ACK, REJ, or ERR
+	  tst udmf(r4)
+	  if ne,<
+	    cmp r0,#uack
+	    if eq,<
+	      call usstrc
+	        .string ^"ACK  "
+	      >
+	    cmp r0,#urej
+	    if eq,<
+	      call usstrc
+	        .string ^"REJ  "
+	      >
+	    cmp r0,#uerr
+	    if eq,<
+	      call usstrc
+	        .string ^"ERR  "
+	      >
+	    >
+	  jsr pc,@(sp)+		; send control code, wait for ready
+	  >
+	else <
+	  tst udmf(r4)		; debugging messages?
+	  if ne,<
+	    call usstrc		; say we're sending READ message
+	      .string ^"READ, STA = "
+	    push uosta(r4)	; USONUM arg: number
+	    call usonum		; put station address in script buffer
+	    call usstrc		; put two spaces in script buffer
+	      .string ^"  "
+	    >
+	  jsr pc,@(sp)+		; send control code, wait for ready
+	  mov umbp(r4),uxmp(r4)	; init xmtr buffer ptr to start of message
+	  mov urmc(r4),uxcc(r4)	; init xmtr char count to no. of characters
+  loop <    dec uxcc(r4)	; decrement count
+	    exitl mi
+	    tst ueif(r4)	; input echoing enabled?
+	    if ne,<
+	      movb @uxmp(r4),r0	; get data character
+	      add pc,r0		; for PICness
+	      movb ucatab-.(r0),-(sp)	; USCHAR arg: character
+	      call uschar	; put stuff we send out in script queue
+	      >
+	    movb @uxmp(r4),r0	; get data character
+	    inc uxmp(r4)	; update buffer ptr
+	    jsr pc,@(sp)+	; send data character
+	    rptl
+	    >
+	  mov #uesc,r0		; send ESC
+	  call uxscrp		; possibly script it
+	  jsr pc,@(sp)+
+	  mov uoecod(r4),r0	; send E1, E2 or E3
+	  call uxscrp		; possibly script it
+	  jsr pc,@(sp)+
+	  >
+	mov #ueom,r0		; send end of message code
+	call uxscrp		; possibly script it
+	jsr pc,@(sp)+
+	mov uxcs(r4),r0		; send checksum
+	call uxscrp		; possibly script it
+	jsr pc,@(sp)+
+	mov #26,r0		; send extra character just to be sure
+	call uxscrp		; possibly script it
+	jsr pc,@(sp)+
+	ifdu <			; DU wants two extra??
+	  mov #26,r0
+	  call uxscrp		; possibly script it
+	  jsr pc,@(sp)+
+	  >
+; Message transmission is complete.  Now get ready for reply.
+	tst udmf(r4)
+	if ne,<
+	  push #')		; end of transmisson to script
+	  call uschar		; print it
+	  >
+	pop *			; throw away co-routine PC
+	jsr pc,urcv		; reinitialize the receiver co-routine
+	pop ursw(r4)		; save co-routine PC
+	jmp dpuret		; and return directly from interrupt
+
+uxscrp:	tst udmf(r4)		; debugging?
+	if ne,<
+	  push r0
+	  call usonum
+	  push #40
+	  call uschar
+	  >
+	return
+
+
+.sbttl	Receiver co-routine
+
+; User200 receiver co-routine.  Setup initally by
+;	JSR PC,URCV
+;	POP URSW(R4)
+; Each co-routine call (JSR PC,@(SP)+) returns with the next character
+; in R0.  URCV buffers the incoming message and handles poll messages.
+; Write messages wake up the handler process.
+
+urcv:	tst urdmf(r4)		; debugging?
+	if ne,<
+	  push #'[		; put ( in the script buffer
+	  call uschar		; print it
+	  >
+	bic #%urbsy,usts(r4)	; no site code received yet
+	mov #177,urcs(r4)	; initialize checksum
+	ifdp <
+	  movb #26,3(r1)	; set sync register
+	  mov #103,(r1)		; DP11, resync by clearing receive active
+				; half-duplex, strip sync, interrupt enable
+	  mov #41,4(r1)		; turn on data terminal ready, status ints
+	  >
+	ifdu <
+	  mov #035026,2(r1)	; set DU11 parameter register, sync = 26,
+				; even parity, 7 bits per character
+	  mov #2,(r1)		; clear search sync (terminate receive)
+	  mov #562,(r1)		; and set search sync and strip sync
+	  mov #10,4(r1)		; set half duplex
+	  >
+; Interface is now trying to synchronize by locating two sync codes.
+	jsr pc,@(sp)+		; get first character after syncronizing
+	call urscrp		; possibly script it
+	cmp r0,#usom		; start of message?
+	bne urcv		; no, ignore
+	jsr pc,@(sp)+		; next char
+	call urscrp		; possibly script it
+	cmp r0,#usit		; correct site code?
+	bne urcv		; no, ignore
+
+; Message header ok, we've got a real message coming (we think).
+	bit #%umsg,usts(r4)	; message still in buffer?
+	if ne,<
+	  tst urdmf(r4)
+	  if ne,<
+	    call usstrc
+	      .string ^"Input buffer busy, "
+	    >
+	  jmp usrej1		; yes, reject this message
+	  >
+	bis #%urbsy,usts(r4)	; indicate we're receiving (got site code)
+	jsr pc,@(sp)+		; get station address
+	mov r0,usta(r4)		; save station address
+	call urscrp		; possibly script it
+	jsr pc,@(sp)+		; get message code
+	mov r0,ucode(r4)	; save message code
+	call urscrp		; possibly script it
+	mov umbp(r4),urmp(r4)	; initialize receiver buffer ptr
+	clr urcc(r4)		; initialize receiver char count
+loop <	  jsr pc,@(sp)+		; get received character
+	  call urscrp		; possibly script it
+	  cmp r0,#ueom		; end of message?
+	  exitl eq		; yes, go get checksum
+	  cmp r0,#uesc		; escape?
+	  if eq,<
+	    call urscrp		; possibly script it
+	    jsr pc,@(sp)+	; yes, check out next char
+	    call urscrp		; possibly script it
+	    cmp r0,#ue1		; E1?
+	    beq 1$
+	    cmp r0,#ue2		; E2?
+	    beq 1$
+	    cmp r0,#ue3		; E3?
+	    bne 2$
+1$:	    mov r0,uecode(r4)	; save for later
+	    bic #%usrm,usts(r4)	; forget about sending any read message
+	    rptl		; continue receiving
+2$:	    bis #200,r0		; 200 bit for space or zero compression codes
+	    >
+; R0 contains a message data byte.  Store in buffer.
+	  bic #%usrm,usts(r4)	; forget about sending any read message
+	  inc urcc(r4)		; update receiver character count
+	  cmp urcc(r4),#1039.	; message too long?
+	  bhi userr4		; yes, send error message
+	  movb r0,@urmp(r4)	; put in buffer
+	  inc urmp(r4)		; and update receiver buffer ptr
+	  rptl
+	  >
+	ifdp <
+	  bic #1,(r1)		; turn off strip sync while reading checksum
+	  >
+	ifdu <
+	  bic #400,(r1)		; turn off strip sync while reading checksum
+	  >
+	jsr pc,@(sp)+		; get message parity word (checksum)
+	tstb urcs(r4)		; should make checksum zero
+	if ne,<			; message parity error
+	  call usstrc
+	    .string ^"CHECKSUM ERROR  "
+	  br userr4
+	  >
+	tst urdmf(r4)
+	if ne,<
+	  push #']		; end of transmisson to script
+	  call uschar		; print it
+	  >
+; Message received ok.  Check station address and control code.
+	mov usta(r4),r0		; get station address
+	mov r0,uwsta(r4)	; save write station address
+	cmp r0,#140		; 140 or 160?
+	beq upollm		; if so must be poll message
+	cmp r0,#160
+	beq upollm
+; Message isn't a poll, must be some sort of write message.
+	cmp r0,#141		; 141 or 161?
+	if ne,<
+	  cmp r0,#161
+	  bne userr4		; not a legal station address
+	  >
+	mov ucode(r4),r0	; get message type
+	cmp r0,#21		; write?
+	beq uwrite
+	cmp r0,#14		; reset-write?
+	beq uwrite
+	cmp r0,#22		; clear-write?
+	beq uwrite
+	cmp r0,#7		; alert?
+	bne userr4		; unknown control code
+	jmp urcv		; yes, ignore alert.
+
+urscrp:	tst urdmf(r4)		; debugging?
+	if ne,<
+	  push r0
+	  call usonum
+	  push #40
+	  call uschar
+	  >
+	return
+
+
+; Send error message, then go back to waiting for receiver.
+; (This here for branch range).
+userr4:	jsr r5,userr		; send error message
+	br urcvj
+
+
+; Message is a write, reset-write, or clear-write.
+uwrite:	bis #%umsg,usts(r4)	; indicate buffer holds a message
+	tst udmf(r4)
+	if ne,<
+	  call usstrc		; put message into script queue
+	    .string ^"WRITE, STA = "
+	  push usta(r4)		; USONUM arg: number
+	  call usonum		; put station address in script buffer
+	  call usstrc		; follow number with spaces
+	    .string ^"  "
+	  >
+	else <
+	  push #%tdnop		; USCHAR arg: character
+	  call uschar		; put a nop in the buffer to wakeup handler
+	  >
+	jsr r5,usack		; send acknowledge
+	inc unwrit(r4)		; count write messages
+	br urcvj
+
+; Message is a poll.
+upollm:	cmp ucode(r4),#5	; make sure control code is "poll"
+	bne userr4
+	inc uwsta(r4)		; make 140 or 160 a 141 or 161 for read 
+				; messages if any
+	tst upbf(r4)		; poll beeping enabled?
+	if ne,<			; yes
+	  push #%tdbel		; USCHAR arg: character
+	  call uschar		; beep when poll messages are received
+	  >
+	bit #%uint,usts(r4)	; interrupt?
+	if ne,<			; yes
+	  bic #%uint+%usrm,usts(r4)	; clear interrupt request and pending
+					; read message (if any)
+	  br 1$
+	  >
+	bit #%usrm,usts(r4)	; waiting to send READ message?
+	if ne,<			; yep, poll message is request to (re)send
+	  jsr r5,usrea		; send a read message
+	  br urcvj
+	  >
+	bit #%usui,usts(r4)	; Is there user input?
+	if ne,<
+	  mov umbp(r4),r3	; ptr to message buffer
+	  mov r4,r2		; get UCBUF ptr (user typein)
+	  add #ucbuf,r2		; ...
+	  mov ucbfln(r4),r0	; no. of characters to copy
+	  if ne,<
+    loop <    movb (r2)+,(r3)+	; copy UCBUF into message buffer
+	      sorl r0		; ...
+	      >
+	    >
+	  bic #%usui,usts(r4)	; clear the user command flag
+	  mov #ue1,uoecod(r4)	; make it a Read-E1
+	  mov r3,urmc(r4)	; calculate length of message
+	  sub umbp(r4),urmc(r4)	; ...
+	  bis #%usrm,usts(r4)	; indicate read message waiting to be sent
+	  jsr r5,usrea		; send the Read message
+	  br urcvj
+	  >
+; No read message pending, reject the poll.
+1$:   dec uwsta(r4)		; reject response to poll has station address
+				; of 140 or 160, not 141 or 161
+      jsr r5,usrej		; send reject to indicate nothing to read
+      br urcvj
+
+
+; Send reject message, then go back to waiting for receiver.
+usrej1:	jsr r5,usrej		; send reject message
+urcvj:
+; don't really go back, instead wait for transmit process to restart us
+;	jmp urcv
+	pop *			; remove co-routine PC from stack
+	jmp dpuret
+
+.sbttl	Transmitter subroutines
+
+; Send error message.
+userr:	mov #uerr,r0		; error message code
+	br ureply
+
+; Send reject message.
+usrej:	mov #urej,r0		; reject message code
+	br ureply
+
+; Send acknowledge message.
+usack:	mov #uack,r0		; ack message code
+	br ureply
+
+; Send read message.
+usrea:	mov #urea,r0		; read message code
+
+ureply:	bic #%urbsy,usts(r4)	; clear busy bit to show we're not recieving
+	mov r0,uocode(r4)	; set control code to send
+	mov uwsta(r4),uosta(r4)	; set station address to that of last write
+	jsr pc,uxmt		; setup transmitter co-routine
+	pop ussw(r4)		; save co-routine PC
+	rts r5
+
+.sbttl	User200 scripting
+
+; The following are called at interrupt level to put things in the script
+; buffer.
+
+
+; USCHAR adds a character to the script buffer.
+
+;	ARGS:				VALS:
+; SP ->	character			(none)
+
+uschar:	push 2(sp)		; INSQ arg1: character
+	push r4			; INSQ arg2: queue ptr
+	add #uscrpq,(sp)	; ...
+	call insq		; put character into queue
+	pop *			; val: error code
+	pop (sp)		; remove argument from stack
+	return
+
+
+; USSTRC adds a string constant (specified by a relative ptr after the call)
+; to the script buffer.
+
+;	ARGS:				VALS:
+; relative ptr after call		(none)
+
+usstrc:	push r0,r1		; save regs
+	mov r5,r1		; pick up relative ptr after call and make
+	add (r5)+,r1		; absolute
+loop <	  movb (r1)+,r0		; get character from string
+	  exitl eq		; zero byte terminates string
+	  push r0		; INSQ arg1: character
+	  push r4		; INSQ arg2: queue ptr
+	  add #uscrpq,(sp)	; ...
+	  call insq		; put character into queue
+	  pop *			; val: error code
+	  rptl
+	  >
+	pop r1,r0		; restore regs
+	return
+
+
+; USONUM outputs a number, in octal, to the script buffer.
+
+;	ARGS:				VALS:
+; SP ->	number				(none)
+
+usonum:	push r0			; save reg
+	mov 4(sp),r0		; get argument
+	jsr r5,1$
+	pop r0,(sp)		; restore reg, remove argument from stack
+	return
+
+; recursive octal conversion routine.  no. in R0.
+1$:	push r0
+	bic #177770,(sp)
+	add #'0,(sp)
+	ror r0
+	asr r0
+	asr r0
+	if ne,<
+	  jsr r5,1$
+	  >
+	call uschar
+	rts r5
+
+.sbttl	User200 handler process
+
+; The handler process is woken to empty the script buffer and to handle
+; received write messages.
+
+uhr4:	.blkw 1			; R4 for handler process passed here
+
+uhandl:	push #0,#80.		; SETSS args: process id, size
+	call setss		; get us a large stack
+	pop *			; val: error code
+	if ne,<
+	  lose 0
+	  >
+	mov uhr4,r4		; get ptr to User200 data structure
+	if eq,<
+	  crash ^"UHR4 not set"
+	  >
+	clr uhr4		; clear for safety
+	jsr pc,uout		; initialize output co-routine
+.if ne  0	; This code commented out because it doesn't work right
+	tst ulpch(r4)		; anything open on LPT channel?
+	if ne,<
+	  mov #15,r0		; send CR so first character of first line
+	  mov pc,ulof(r4)	; set flag so CR makes it to LPT
+	  jsr pc,@(sp)+		; will be handled as carriage control
+	  >
+.endc
+	pop uosw(r4)		; save co-routine PC
+
+uhloop:	push r4			; REMW arg1: queue ptr
+	add #uscrpq,(sp)	; ...
+	push #-1		; REMW arg2: timeout
+	call remw		; wait for something in queue
+	pop *			; val: error code
+	bne uhloop
+loop <	  push r4		; REMQ arg: queue ptr
+	  add #uscrpq,(sp)	; ...
+	  call remq		; get character from queue
+	  pop r0,*		; vals: character, error code
+	  exitl ne
+	  push uoch(r4),r0	; WCHAR args: channel id, character
+	  call wchar		; output script character to user's terminal
+	  rptl
+	  >
+uhwtst:	tst unwrit(r4)		; any write messages?
+	beq uhloop
+	dec unwrit(r4)		; acknowledge wakeup
+	cmp ucode(r4),#21	; write?
+	beq 1$			; yes
+	cmp ucode(r4),#14	; reset write?
+	if eq,<			; yes
+	  push uoch(r4),#%tdhom	; WCHAR args: channel id, character
+	  call wchar		; home
+	  br 1$
+	  >
+	cmp ucode(r4),#22	; clear write?
+	if eq,<			; yes
+	  tst ucwt(r4)		; check clear write flag
+	  beq 1$		; if clear'd, then don't do it
+	  push uoch(r4),#%tdclr	; WCHAR args: channel id, character
+	  call wchar		; clear 
+	  br 1$
+	  >
+	push ucode(r4)		; IOA arg: message type code
+	push uoch(r4)		; IOA arg: channel id
+	call ioac		; tell user about it
+	  .string ^"Unknown message type (^o) received!
+"
+	br uhandl
+1$:	cmp uecode(r4),#ue3	; Write-E3 (read more cards)?
+	if eq,<
+	  jmp ucards		; read cards
+	  >
+
+; Write message was either LPT data (Write-E2) or DO data (Write-E1)
+
+	mov umbp(r4),r3		; flip buffers so can receive another message
+	mov ulbp(r4),umbp(r4)	; while sending this one to the LPT
+	mov r3,ulbp(r4)		; ...
+	mov r3,r5		; get ptr to just past last data byte
+	add urcc(r4),r5		; by adding message length
+; R3 and R5 setup, don't clobber in code below!
+	bic #%umsg,usts(r4)	; having switched buffers the receiver buffer
+				; no longer contains a message
+	cmp uecode(r4),#ue1	; Write-E1 (send to display)?
+	if eq,<			; yes, generate automatic read message
+; Write-E1 (display data).
+	  clr ulof(r4)		; clear LPT output flag
+	  mov #1,udof(r4)	; set display output flag
+	  >
+	else <
+; Write-E2 (LPT data).  Next will be poll asking status of LPT.
+	  mov #1,ulof(r4)	; set LPT output flag
+	  mov ueof(r4),udof(r4)	; set display output flag from echo output
+				; option
+	  tst ulpch(r4)		; write file open?
+	  beq 5$		; no, treat as not ready
+	  push ulpch(r4)	; ORDER arg: channel id
+	  push #1,#0		; ORDER args: order code, order arg
+	  call order		; issue status request to see if LPT ready
+	  pop r0		; val: code
+	  if ne,<
+5$:	    mov #ue2,uoecod(r4)	; E2 to indicate printer hung
+	    clr urmc(r4)	; message is 2 characters long
+	    bis #%usrm,usts(r4)	; indicate we're trying to send read message
+	    br uhwtst		; wait for another write message
+	    >
+	  mov #ue3,uoecod(r4)	; E3 to indicate printer ready
+	  clr urmc(r4)		; message is 2 characters long
+	  bis #%usrm,usts(r4)	; indicate we're trying to send read message
+	  >
+
+; Now expand compression codes and output.
+
+; R3 and R5 setup above.
+2$:	cmp r3,r5		; reached end of data yet?
+	if eq,<
+	  jmp uhwtst		; yes, go handle next write message
+	  >
+	movb (r3)+,r0		; find next escape code
+	if pl,<			; (the rcvr interrupt level set the 200 bit)
+	  add pc,r0		; for PIC addressing
+	  movb ucatab-.(r0),r0	; translate to ascii
+	  jsr pc,@uosw(r4)	; call output co-routine
+	  pop uosw(r4)		; save co-routine PC
+	  br 2$
+	  >
+	bic #177600,r0		; clear high bits
+	cmp r0,#101		; Carriage Return?
+	beq 3$
+	cmp r0,#120		; End of Line?
+	bne 4$
+3$:	mov #15,r0		; output CR
+	jsr pc,@uosw(r4)	; call output co-routine
+	pop uosw(r4)		; save co-routine PC
+	br 2$
+4$:	mov r0,r1
+	bit #40,r1		; space or zero compression?
+	if ne,<
+	  mov #40,r0		; space compression
+	  >
+	else <
+	  mov #'0,r0		; zero compression
+	  >
+	bic #177740,r1		; clear everything but compression count
+	push uosw(r4)		; get co-routine PC
+loop <	  jsr pc,@(sp)+		; call output co-routine
+	  sorl r1
+	  >
+	pop uosw(r4)		; save co-routine PC
+	br 2$
+
+
+uout:	jsr pc,@(sp)+		; co-call
+	tst udof(r4)		; output to display?
+	if ne,<
+	  push uoch(r4),r0	; WCHAR args: channel id, character
+	  call wchar		; output character to display
+	  >
+	tst ulof(r4)		; output to LPT?
+	if ne,<
+	  push ulpch(r4),r0	; WCHAR args: channel id, character
+	  call wchar		; output character to LPT
+	  >
+	cmp r0,#15		; CR?
+	bne uout
+	tst udof(r4)		; display output?
+	if ne,<
+	  push uoch(r4),#12	; WCHAR args: channel id, character
+	  call wchar		; output LF after CR to display
+	  >
+	tst ulof(r4)
+	beq uout
+	jsr pc,@(sp)+		; get character after CR
+	cmp r0,#'+		; +?
+	beq uout		; yes, overprint by not sending LF
+	cmp r0,#'2		; 2?
+	if eq,<
+	  push ulpch(r4),#14	; WCHAR args: channel id, character
+	  call wchar		; output FF
+	  br uout
+	  >
+	cmp r0,#'0		; 0?
+	beq 1$			; yes, double space
+	cmp r0,#'1		; 1?
+	bne 2$			; yes, should FF, double space to save paper
+	tst ueff(r4)		; Form feeds allowed in output??
+	if ne,<
+	  push ulpch(r4),#14	; WCHAR args: channel id, char
+	  call wchar		; output a form feed
+	  br uout
+	  >
+1$:	push ulpch(r4),#12	; WCHAR args: channel id, char
+	call wchar		; output LF
+	push ulpch(r4),#15	; WCHAR args: channel id, char
+	call wchar		; output CR
+2$:	push ulpch(r4),#12	; WCHAR args: channel id, char
+	call wchar		; output LF
+	br uout
+
+
+; Come here to handle Write-E3 messages.  Read card data into message
+; buffer and prepare to send on next poll message.  If error (e.g. EOF)
+; then send data with Read-E2, else send data with Read-E3.
+
+ucards:	mov umbp(r4),r3		; ptr to message buffer
+	mov #-1,r0		; presume end of file in case no CR file
+	tst ucrch(r4)		; card reader file open?
+	beq 2$			; no, send Read-E2 with no data
+	mov #12.,r1		; no. of lines to read
+1$:	mov #80.,r2		; no. of characters to put in each line
+loop <	  push ucrch(r4)	; RCHAR arg: channel id
+	  call rchar		; read character from User200 card reader
+	  pop r0		; val: character
+	  if mi,<		; end of file
+	    call upad		; pad out last line with spaces
+	    exitl
+	    >
+	  cmp r0,#12		; LF?
+	  if eq,<
+	    call upad		; yes, pad out this line with spaces
+	    sob r1,1$		; go back to do next line
+	    exitl
+	    >
+	  cmp r0,#40		; control character?
+	  rptl lo		; yes, ignore
+	  add pc,r0			; translate from ASCII to CDC code
+	  movb uactab-40-.(r0),r0	; ...
+	  rptl eq		; ignore if character translates to zero
+	  dec r2		; ignore if more than than 80 characters
+	  rptl mi		; in line
+	  movb r0,(r3)+		; put character into message buffer
+	  rptl
+	  >
+2$:	tst r0			; end of file?
+	if pl,<
+	  mov #ue3,uoecod(r4)	; no error, Read-E3
+	  >
+	else <
+	  mov #ue2,uoecod(r4)	; error, Read-E2
+	  tst ucrch(r4)		; read file open?
+	  if ne,<
+	    push ucrch(r4)	; DETACH arg: channel id
+	    clr ucrch(r4)	; indicate its closed
+	    call detach		; close read file
+	    >
+	  >
+	mov r3,urmc(r4)		; calculate length of message
+	sub umbp(r4),urmc(r4)	; ...
+	bis #%usrm,usts(r4)	; card data will be sent on next poll
+	bic #%umsg,usts(r4)	; unlock buffer
+	jmp uhwtst
+
+
+; UPAD pads out the current line with spaces.
+
+;	ARGS:				VALS:
+; R2:	no. of chars to pad		(none)
+; R3:	buffer ptr
+
+upad:	dec r2
+	bmi 1$
+	movb uactab,(r3)+
+	br upad
+1$:	return
+
+.sbttl Translation tables
+
+; Conversion table from ASCII to CDC
+
+;	CHAR		MAPS TO 
+
+;	@		0-8-6
+;	[		8-7
+;	]		0-8-2
+;	%		8-6
+;	#		8-4
+;	"		0-8-5
+;	'		11-0
+;	\		0-8-7
+;	^		11-8-5
+;	!		11-8-6
+;	<		12-0
+;	>		11-8-7
+;	_		8-5
+;	?		12-8-5
+;	;		12-8-7
+;	&W		6-7-8-9
+;	&X		7-8-9
+
+uactab:	.byte 120,056,135,114,053,116,076,052	;  !"#$%&' (MAP & = 'ESC')
+	.byte 134,074,054,060,133,040,073,121	; ()*+,-./
+	.byte 112,101,102,103,104,105,106,107	; 01234567
+	.byte 110,111,100,077,072,113,057,075	; 89:;<=>?
+	.byte 136,061,062,063,064,065,066,067	; @ABCDEFG
+	.byte 070,071,041,042,043,044,045,046	; HIJKLMNO
+	.byte 047,050,051,122,123,124,125,126	; PQRSTUVW
+	.byte 127,130,131,117,137,132,055,115	; XYZ[\]^_
+	.byte 000,061,062,063,064,065,066,067	; `abcdefg
+	.byte 070,071,041,042,043,044,045,046	; hijklmno
+	.byte 047,050,051,122,123,124,125,126	; pqrstuvw
+	.byte 127,130,131,000,000,000,000,000	; xyz{|}~
+
+
+; Conversion table from CDC to ASCII.
+; Things that shouldn't happen come out as !.
+
+ucatab:	.byte 041,041,041,041,041,041,041,041
+	.byte 041,041,041,041,041,041,041,041
+	.byte 041,041,041,041,041,041,041,041
+	.byte 041,041,041,041,041,041,041,041
+
+	.byte 055,112,113,114,115,116,117,120
+	.byte 121,122,047,044,052,136,041,076
+	.byte 053,101,102,103,104,105,106,107
+	.byte 110,111,074,056,051,077,046,073
+
+	.byte 072,061,062,063,064,065,066,067
+	.byte 070,071,060,075,043,137,045,133
+	.byte 040,057,123,124,125,126,127,130
+	.byte 131,132,135,054,050,042,100,134
+
+	.even
+
+; 126 070 065 126 !!!
+
+
+.if ne  ndp
+; Parity table.  Index by byte to get byte with odd parity.
+partab:	.byte 200,001,002,203,004,205,206,007
+	.byte 010,211,212,013,214,015,016,217
+	.byte 020,221,222,023,224,025,026,227
+	.byte 230,031,032,233,034,235,236,037
+
+	.byte 040,241,242,043,244,045,046,247
+	.byte 250,051,052,253,054,255,256,057
+	.byte 260,061,062,263,064,265,266,067
+	.byte 070,271,272,073,274,075,076,277
+
+	.byte 100,301,302,103,304,105,106,307
+	.byte 310,111,112,313,114,315,316,117
+	.byte 320,121,122,323,124,325,326,127
+	.byte 130,331,332,133,334,135,136,337
+
+	.byte 340,141,142,343,144,345,346,147
+	.byte 150,351,352,153,354,155,156,357
+	.byte 160,361,362,163,364,165,166,367
+	.byte 370,171,172,373,174,375,376,177
+.endc	; ne ndp
+
+urfiln:	.rad50 "RH"
+	.rad50 "U200"
+	.rad50 "OUT"

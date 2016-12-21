@@ -1,0 +1,1330 @@
+; TROLLR - DISPLAY EDITOR   -*-PALX-*-
+trvn==%fnam2
+
+.sbttl	Data bases
+
+dsect <
+
+	 .blkb lcs		; leave room for command structure
+
+trerd::	 .blkw 1		; character to reread or -1 if none
+evmax::	 .blkw 1		; maximum vertical position
+ehmax::	 .blkw 1		; maximum horizontal position
+evpos::	 .blkw 1		; current vertical position
+ehpos::	 .blkw 1		; current horizontal position
+ellen::	 .blkw 1		; length of current edit line
+height:: .blkw 1		; no. of edit lines
+
+pagep::	 .blkw 1		; ptr to PAGE
+pagee::	 .blkw 1		; ptr to 1st character not in PAGE
+lpage==2052.
+page::	 .blkb lpage		; page to hold screen-full of data
+	 .word 0		; to terminate page in case is full
+
+l..k==6*80.
+..K::	 .blkw 1		; length
+	 .blkb l..k+2		; enuf room for 6 full lines
+
+ioflg::	  		; RDFLG and WTFLG must occupy the same word; also
+	  		; RDFLG must preceed WTFLG
+rdflg::	 .blkb 1  	; read-file open (or about to be) flag
+wtflg::	 .blkb 1  	; write-file open (or about to be) flag
+
+iofile:: .blkw 1		; ptr to file name block
+
+drch::	 .blkw 1		; disk read channel
+dwch::	 .blkw 1		; disk write channel 
+
+curptr:: .blkw 1		; ptr to current character in page
+curend:: .blkw 1		; ptr to end of stuff in page
+edmarg:: .blkw 1		; argument used in edit-mode
+edmark:: .blkw 1		; edit mode mark
+edmlsv:: .blkw 1		; last value set by ^V command
+schar::	 .blkw 1		; search character
+tablst:: .blkb 10.		; list of tab positions
+tpagen:: .blkw 1		; keep track of page number here
+prsflg:: .blkw 1		; peruse-flag, used by next-page
+rdispy:: .blkw 1		; if non-zero, then redisplay necessary
+ecpflg:: .blkw 1		; 1 to capitalize while in edit-mode
+overwr:: .blkw 1		; -1 to overwrite characters in buffer(page)
+coverw:: .blkw 1		; non-zero if next character is to be
+				; inserted even if we are in overwrite mode
+	>,ltdat
+
+
+.sbttl	Initialization
+
+trollr:	push #0,#80.		; SETSS args: process id, size
+	call setss		; get us a large stack
+	pop r0			; val: error code
+	if ne,<
+	  jmp comerr
+	  >
+	push #ltdat/2,#60.	; ALOCW args: size, timeout
+	call alocw  		; allocate space for variables
+	pop r1,r0  		; val: ptr
+	if ne,<
+	  jmp comerr
+	  >
+	mov #lcs/2,r0		; length of command structure
+loop <	  mov (r4)+,(r1)+	; copy into trollr data area
+	  sorl r0
+	  >
+	sub #lcs,r4		; get back ptr to command structure
+	sub #lcs,r1		; ...
+	push r4			; FREE arg: ptr
+	call free		; free command structure
+	mov r1,r4		; use Trollr's version
+	mov r4,filep(r4)	; ptr to FILNAM
+	add #filnam,filep(r4)	; ...
+	mov r4,pagep(r4)	; get ptr to page buffer
+	add #page,pagep(r4)	; ...
+	mov r4,pagee(r4)		; get ptr to end of page buffer
+	add #page+lpage,pagee(r4)	; ...
+	mov #-1,trerd(r4)  	; no char to reread
+	clr overwr(r4)		; not in overwrite mode
+	push uoch(r4)		; ORDER arg: channel id
+	push #10000+tvmax,#0	; ORDER args: order code, order arg
+	call order		; read page height
+	pop evmax(r4)		; val: page height
+	bgt 1$			; ok if screen size is bigger than zero
+	err ^"TROLLR only works on display terminals."
+	jsr pc,exit
+
+1$:	call moroff		; turn off more processing
+	push uoch(r4)		; ORDER arg: channel id
+	push #10000+thmax,#0	; ORDER args: order code, order arg
+	call order		; read page height
+	pop ehmax(r4)		; val: page height
+	mov evmax(r4),height(r4)	; set no. of edit lines to be no. of
+	sub #3-1,height(r4)		; lines minus 3
+	mov r4,r0		; ptr to TABLST
+	add #tablst,r0		; ...
+	mov #7.+<14.*400>,(r0)+	; initialize the tab stops
+	mov #21.+<28.*400>,(r0)+
+	mov #35.+<42.*400>,(r0)+
+	mov #49.+<56.*400>,(r0)+
+	mov #63.+<70.*400>,(r0)+
+	mov #77.,(r0)+
+	clr prsflg(r4)
+	clr ecpflg(r4)
+	mov #1,tpagen(r4)	; current page number is 1
+	jsr pc,clear		; clear page buffer
+
+; fall through to COMM
+
+.sbttl	Command processing
+
+comm:	mov errflg(r4),r1  	; any error message to display?
+	if ne,<
+	  push uoch(r4)		; POSIT arg: channel id
+	  push evmax(r4),#0	; POSIT args: verical, horizontal
+	  call posit		; position to beginning of last line
+	  jsr r5,typsc  	; display error header message
+	    .litrl <
+	      .byte %tdeol,%tdso3,40,0
+	      >
+	  push uoch(r4),r1	; WRITEZ args: channel id, ptr to asciz string
+	  call writez  		; type error message
+	  clr errflg(r4)  	; displayed once, now forget about it
+	  jsr r5,typsc		; reset mode
+	    .litrl <
+	      .byte %tdso0,0
+	      >
+	  >
+	push uoch(r4)		; POSIT arg: channel id
+	push evmax(r4)		; POSIT arg: vertical
+	dec (sp)		; ...
+	push #0			; POSIT arg: horizontal
+	call posit		; position to beginning of second last line
+	jsr r5,typsc  		; prompt for command
+	  .litrl <
+	    .byte %tdeol,%tdso2,':,0
+	    >
+	call rdcmdl  		; read a line into the command buffer
+	jsr r5,typsc  		; reset the mode
+	  .litrl <
+	    .byte %tdso0,0
+	    >
+	push uoch(r4)		; POSIT arg: channel id
+	push evmax(r4),#0	; POSIT args: vertical, horizontal
+	call posit		; position to beginning of last line
+	tdtype eos		; erase any error message
+	call arg		; skip over leading spaces
+	pop *			; val: character
+	beq comm
+	call sarg		; read a string argument
+				; SCASE args: ptr, length
+	push pc			; SCASE arg3: ptr to list of strings
+	add #tclist-.,(sp)	; ...
+	call scase		; lookup command name in list
+	pop r1,*		; vals: ptr to entry, error code
+	if ne,<
+	  err ^"Illegal command"
+	  br comm
+	  >
+	jsr pc,@2(r1)		; call routine for this command
+	br comm
+
+tclist:	.word 4			; no. of bytes per entry
+	defcom shutdn,<shutdown>
+	defcom nshtdn,<stayup>
+.lif ne asmcdc
+	defcom tru200,<u200>
+	defcom exit,<exit,bye,x>
+	defcom tlistc,<?>
+	defcom info,<info>
+	defcom news,<news>
+	defcom read,<read,r>
+	defcom write,<write,w>
+	defcom rp,<read_page,rp>
+	defcom wp,<write_page,wp>
+	defcom nxtpag,<page,p>
+	defcom clswt,<close_write,cw>
+	defcom clsrd,<close_read,cr>
+	defcom close,<close,cl>
+	defcom display,<display,d>
+	defcom clear,<clear,c>
+	defcom edit,<edit,e>
+.if ne  nlp
+	defcom edlpt,<lpt>
+	defcom tpl,<tpl>
+.endc
+	defcom cap,<capitalize,cap>
+	defcom ovrwrt,<overwrite,ow>
+	defcom novrwt,<insert,in>
+	defcom peruse,<peruse>
+	defcom tabset,<tabset>
+	defcom ld,<list_directory,ld>
+	defcom df,<delete,df>
+	defcom dfp,<delete_file_paranoid,dfp>
+	defcom ren,<rename>
+	defcom copy,<copy>
+	defcom move,<move>
+	defcom lall,<list_all,la>
+	defcom lu,<list_users,lu>
+.lif ne  asmtek
+	defcom tekplt,<tekplot>
+	.word 0			; terminator
+
+.sbttl	TROLLR command routines
+
+;U200  command
+.if ne  asmcdc
+tru200: call trexit		; do a clean up
+	tdtype clr		; clear the screen
+	pop *			; remove return PC from stack
+	jmp u200		; startup a U200
+.endc
+
+; EXIT command.
+exit:   call trexit		; do a clean up
+	pop *			; remove return PC from stack
+        rts pc
+
+;TREXIT cleans up after a TROLLR
+trexit:	tst ioflg(r4)		; any files open?
+	if ne,<
+	  err ^"Please close your files before exiting"
+	  pop r5		; restore linkage register
+	  rts pc		; go back to TROLLR
+	  >
+	tdtype clr  		; clear screen
+	push #lcs/2		; ALOCL arg: size
+	call alocl		; allocate command structure
+	pop r1			; val: ptr
+	mov #lcs/2,r0		; no. of words in command structure
+loop <	  mov (r4)+,(r1)+	; copy TROLLR's command stuff
+	  sorl r0		; ...
+	  >
+	sub #lcs,r1		; get back ptrs to start of data blocks
+	sub #lcs,r4		; ...
+	push r4			; FREE arg: ptr
+	call free		; free Trollr's data block
+	mov r1,r4		; set command structure ptr
+	mov r4,filep(r4)	; ptr to FILNAM
+	add #filnam,filep(r4)	; ...
+ 	call moron		; turn on more processing
+	return
+
+
+; ? command.
+tlistc:	push uoch(r4),#%tdclr	; WCHAR args: channel id, character
+	call wchar		; clear screen first
+	push pc			; LISTC arg: ptr to command list
+	add #tclist-.,(sp)	; ...
+	call listc		; typeout list of Trollr commands
+	rts pc
+
+
+; NEWS command.
+news:	mov #newfil,r1  	; "INF;NEWS.TR"
+	br ird
+
+; INFO command.
+info:	mov #hlpfil,r1  	; "INF;TROLLR.HLP"
+ird:	tst ioflg(r4)  		; any file open?
+	bne tefao
+	mov r1,iofile(r4)
+	br rea1  		; start reading the file
+
+; READ command.
+read:	tstb rdflg(r4)  	; is a read file already open?
+	bne tefao  		; if so give an error
+	push filep(r4)		; FILARG arg: ptr to filename buffer
+	call filarg  		; set file name
+	mov filep(r4),iofile(r4)
+rea1:	jsr pc,opnrd  		; open read file
+	pop r0			; val: error code
+	if ne,<
+	  jmp comerr		; handle error opening file
+	  >
+	jsr pc,rdpage  		; read in first page
+	jmp display		; display page
+
+
+; WRITE command.
+write:	tstb wtflg(r4)  	; is a write flag already open?
+	bne tefao  		; if so give an error
+	push filep(r4)		; FILARG arg: ptr to filename buffer
+	call filarg  		; set file name
+	mov filep(r4),iofile(r4)
+	jsr pc,opnwt  		; open write file
+	pop r0			; val: error code
+	if ne,<
+	  jmp comerr		; handle error opening write file
+	  >
+	mov #1,tpagen(r4)	; start on page 1
+	rts pc
+
+
+tefao:	err ^"File already open"
+	rts pc
+
+; CLOSE_READ or CR command.
+clsrd:	push ioflg(r4)  	; save wtflg
+	clrb (sp)  		; clear rdflg on stack
+	clrb wtflg(r4)  	; clear so just read-close
+	br clset  		; set flag so restore ioflg on stack
+
+;;; CLOSE_WRITE or CW command.
+clswt:	push ioflg(r4)  	; save rdflg
+	clrb 1(sp)  		; clear wtflg on stack.
+	clrb rdflg(r4)  	; clear rdflg to simulate just
+	mov #1,tpagen(r4)	; reset page number
+	br clset  		; WRITE-CLOSE.
+
+;;; CLOSE command.
+close:	clr -(sp)  		; IOFLG will be set to 0
+clset:	tst ioflg(r4)  		; any file open to close?
+	if eq,<
+	  pop ioflg(r4)		; set IOFLG to new value
+	  jmp rpno
+	  >
+	tstb wtflg(r4)  	; write file open?
+	if eq,<
+	  jsr r5,rdcls  	; no write file open, just close read
+	  br 1$
+	  >
+loop <	  jsr pc,wtpage  	; write out this page
+	  tstb rdflg(r4)  	; still more to read?
+	  exitl eq
+	  jsr pc,rdpage  	; read next page
+	  rptl
+	  >
+	jsr r5,wtcls  		; close write if set
+1$:	err ^"File closed"
+2$:	pop ioflg(r4)  		; restore ioflg
+	rts pc
+
+
+rdcls:	tstb rdflg(r4)  	; read file open?
+	if ne,<
+	  push drch(r4)  	; DETACH arg: channel id
+	  call detach  		; close file
+	  clrb rdflg(r4)  	; create read file open flag
+	  >
+	rts r5
+
+
+wtcls:	tstb wtflg(r4)  	; any file open for write?
+	if ne,<
+	  push dwch(r4)  	; DETACH arg: channel id
+	  call detach  		; close file
+	  clrb wtflg(r4)  	; clear write file open flag
+	  >
+	rts r5
+
+; READ_PAGE or RP command.
+rp:	tstb rdflg(r4)  	; read file open?
+	beq rpno  		; yes
+	call numarg		; read numeric argument to read page command
+	pop r0			; val: no. (default is 1)
+loop <	  jsr pc,rdpage  	; read in next page
+	  sorl r0
+	  >
+	jsr pc,display  	; display page
+	rts pc
+
+rpno:	err ^"No File Open"
+	rts pc
+
+; WRITE_PAGE or WP command.
+wp:	tstb wtflg(r4)  	; write file open?
+	beq rpno  		; no, abort
+	jsr pc,wtpage  		; yes, write out page
+	rts pc
+
+
+; PAGE or P command.
+nxtpag:	call numarg  		; read numeric argument to page command
+	pop r2  		; val: no. (default is 1)
+	tst ioflg(r4)  		; is a file opened?
+	if eq,<
+	  jmp rpno
+	  >
+1$:	jsr pc,wtpage  		; write this page out (if write set)
+	jsr pc,rdpage  		; read in next page (if read set)
+	sob r2,1$  		; do this arg times
+	jsr pc,display  	; done, display this page
+	tst prsflg(r4)
+	beq 2$
+	jsr pc,readc
+	inc r2  		; set r2 to 1 (should be clear from loop)
+	cmpb r0,#40
+	beq 1$
+	cmp r0,#22  		; ^R enters edit mode
+	bne 2$
+	jmp edit
+2$:	rts pc
+
+
+rdpage:	jsr r5,save6  		; save regs
+	mov pagep(r4),r1	; pointer to top of page
+	tstb rdflg(r4)  	; read file open?
+	beq 1$  		; no, return
+	mov #79.,r3  		; chars-in-line count. (counts down)
+	mov height(r4),r2  	; max # of lines that will put into page
+	sub #7,r2  		; leave 7 lines for editing
+loop <	  push drch(r4)  	; RCHAR arg: channel id
+	  call rchar  		; read next character from file
+	  pop r0  		; val: character
+	  rptl eq  		; ignore nulls
+	  bmi 2$  		; -1 is end of file from RCHAR
+	  movb r0,(r1)+  	; put char into page
+	  cmp r0,#14  		; stop at form feed too
+	  exitl eq
+	  cmp r0,#15  		; don't stop between CR and LF
+	  rptl eq
+	  cmp r0,#12  		; LF?
+	  if ne,<
+	    sorl r3  		; have too many chars per line?
+	    >
+	  mov #79.,r3  		; reset character count
+	  sorl r2  		; got enough lines yet?
+	  >
+1$:	mov r1,curend(r4)
+	mov pagep(r4),curptr(r4)
+	mov #-1,edmark(r4)  	; no mark yet
+	jsr r5,rest6
+	rts pc
+2$:	clrb rdflg(r4)  	; clear read flag
+	push drch(r4)  		; DETACH arg: channel id
+	call detach  		; destroy the channel
+	err ^"End of read file"
+	br 1$
+
+
+wtpage:	tstb wtflg(r4)  	; is write file open?
+	if ne,<
+	  push dwch(r4),pagep(r4)  	; WRITEN args: channel id, ptr
+	  push curend(r4)		; WRITEN arg: no. of characters
+	  sub pagep(r4),(sp)	; ...
+	  call writen  		; write out page
+	  inc tpagen(r4)	; another write, another page
+	  >
+	rts pc
+
+.if ne  nlp
+; LPT command.
+edlpt:	jsr pc,gettpl		; get the TPL if possible
+	pop r1,r0  		; vals: channel id, error code
+	if ne,<
+	  jmp comerr		; handle error attaching LPT
+	  >
+	push r1,pagep(r4)	; WRITEN args: channel id, ptr
+	push curend(r4)		; WRITEN arg: no. of characters
+	sub pagep(r4),(sp)	; ...
+	call writen  		; write out page
+	push r1			; DETACH args: channel id
+	call detach
+	rts pc
+.endc
+
+; PERUSE command.
+peruse:	call numarg		; read numeric argument to PERUSE command
+	pop prsflg(r4)  	; val: no. (set peruse flag to argument)
+	rts pc
+
+
+; CAPITALIZE or CAP command.  "CAP" causes input in edit mode to be
+; capitalized.  "CAP 0" turns this off. 
+cap:	call numarg		; read numeric argument to CAP command
+	pop ecpflg(r4)   	; val: no. (default is 1)
+	rts pc
+
+ovrwrt: mov #-1,overwr(r4)	; put us in overwrite mode
+	rts pc
+
+novrwt:	clr overwr(r4)		; take us out of overwrite mode
+	rts pc
+
+; TABSET command.
+tabset:	mov r4,r1		; get ptr to TABLST, the list of tab stops
+	add #tablst,r1		; ...
+	mov #9.,r2  		; maximum no. of tabs stops
+loop <	  call rdcmdc		; get break char
+	  pop r0  		; NULL (end of command line)?
+	  exitl eq  		; yes, end list
+	  call numarg		; get col. no.
+	  movb (sp)+,(r1)+  	; put on list
+	  sorl r2
+	  dec r1
+	  err ^"Too many arguments"
+	  >
+	clrb (r1)		; terminate list with a null
+	rts pc
+
+
+; CLEAR or C command.
+clear:	mov pagep(r4),curptr(r4)
+	mov pagep(r4),curend(r4)
+	mov #-1,edmark(r4)
+; fall through to DISPLAY
+
+; DISPLAY command.
+display:
+	tdtype clr  		; clear screen
+	push uoch(r4),pagep(r4)	; WRITEN args: channel id, ptr
+	push curend(r4)		; WRITEN arg: no. of characters
+	sub pagep(r4),(sp)	; ...
+	call writen
+; fall through to CMLINE
+
+; Display the command mode line
+cmline:	push uoch(r4)		; POSIT arg: channel id
+	push evmax(r4)		; POSIT arg: vertical
+	sub #2,(sp)		; ...
+	push #0			; POSIT arg: horizontal
+	call posit		; position cursor at beginning of mode line
+	jsr r5,typsc
+	  .litrl <
+	    .byte %tdeos
+	    .asciz "Troll-R Editor -- {Command} Page # "
+	    >
+	push tpagen(r4),uoch(r4)
+	tstb wtflg(r4)		; write file open??
+	if eq,<			; no let it be page 0
+	  clr 2(sp)		; ...
+	  >
+	call ioac
+	  .string ^"^d."
+	rts pc
+
+.sbttl	Edit Mode Initialization
+
+; Enter Edit Mode
+edit:	call emline		; display edit mode line
+
+
+.sbttl	Edit Mode processing - Main loop
+
+edloop:	mov #1,edmarg(r4)  	; reset arg to 1
+edpval:	call eposit
+	call bol		; see how far it is to beginning of line
+	pop ellen(r4)		; val: no of chars
+	call eol		; get number of chars to end of line
+	add (sp)+,ellen(r4)	; val: number of chars
+	jsr pc,readc  		; read next character
+	cmp r0,#40  		; control-character?
+	if lo,<
+	  asl r0  		; times two for word indexing
+	  jsr pc,@edmjt(r0)  	; jump to routine for control character
+	  br edloop
+	  >
+	cmp r0,#177  		; rubout?
+	if eq,<
+	  jsr pc,del
+	  br edloop
+	  >
+	tst ecpflg(r4)  	; should we capitalize char?
+	beq 1$
+	cmp r0,#'a  		; yes, lower case letter?
+	blo 1$
+	cmp r0,#'z
+	bhi 1$
+	bic #40,r0  		; convert to upper case
+1$:	jsr pc,ichar
+	br edloop
+
+
+edmjt:	.word smark  		; ^@ (NULL)
+	.word ctrla  		; ^A
+	.word ctrlb  		; ^B
+	.word ctrlq  		; ^C
+	.word ctrld  		; ^D
+	.word ctrle  		; ^E
+	.word ctrlf  		; ^F
+	.word ctrlg  		; ^G
+	.word ctrls  		; ^H (BS)
+	.word ctrli  		; ^I (TAB)
+	.word ctrlg  		; ^J (LF)
+	.word ctrlk  		; ^K
+	.word ctrll  		; ^L
+	.word ctrlm  		; ^M (CR)
+	.word ctrln  		; ^N
+	.word ctrlo  		; ^O
+	.word ctrlp  		; ^P
+	.word ctrlq  		; ^Q
+	.word ctrlr  		; ^R
+	.word ctrls  		; ^S
+	.word ctrlg  		; ^T
+	.word ctrlu  		; ^U
+	.word ctrlv  		; ^V
+	.word ctrlw  		; ^W
+	.word ctrlx  		; ^X
+	.word ctrly  		; ^Y
+	.word ctrlz  		; ^Z
+	.word insert  		; ^[ (ESC)
+	.word ctrlg  		; ^\
+	.word darg  		; ^]
+	.word ctrlg  		; ^^
+	.word ctrlg  		; ^_
+
+.sbttl	Edit Mode commands
+
+insert: mov pc,coverw(r4)	; cancel next overwrite command
+	rts pc
+
+; Self inserting characters
+ichar:  push edmarg(r4)		; EDOWNN arg: no. of characters
+	call edownn		; make room for <argument> characters
+	mov (sp),r1		; val: no. of characters
+	beq 1$
+	tst overwr(r4)		; in overwrite mode ?????
+	if ne,<			; yes, now check to see if <ESC> preceded char
+	  tst coverw(r4)	; previous character <ESC>???
+	  if eq,<		; no, clean up room just taken
+	    push r1		; EUPN arg: no. of characters
+	    call eupn		; back up the chars just moved
+	    >
+	  else <		; if previous char was <ESC> then 
+	    clr coverw(r4)	; don't let it happen next time
+	    >
+	  >
+	mov curptr(r4),r2
+loop <	  movb r0,(r2)+
+	  sorl r1
+	  >
+	call dislin
+	mov r2,curptr(r4)
+	add (sp),ehpos(r4)
+	cmp r0,#40
+	if lo,<
+	  add (sp),ehpos(r4)
+	  >
+1$:	cmp (sp)+,edmarg(r4)
+	if ne,<
+	  jmp ctrlg
+	  >
+	mov #-1,edmark(r4)  	; clear mark
+	rts pc
+
+
+; RUBOUT: Delete character to left (reject if at BOL). Display rest of
+; line.  In case of TAB rubbed out, ^L is done to reset.
+del:	mov #-1,edmark(r4)	; reset mark
+	push edmarg(r4)
+	call bol
+	pop r1
+	cmp (sp),r1
+	if hi,<
+	  mov r1,(sp)
+	  >
+	sub (sp),curptr(r4)
+	call eupn
+	call eposit
+	call dislin 		; display new line
+	cmp edmarg(r4),r1
+	if hi,<
+	  jmp ctrlg
+	  >
+	rts pc
+
+; ^@: Set mark from point.
+smark:	mov curptr(r4),edmark(r4)
+	rts pc
+
+
+; ^A: Move to beginning of current line.
+ctrla:	call bol
+	sub (sp)+,curptr(r4)
+	rts pc
+
+
+; ^B: Move left one character (reject if at beginning of line).
+ctrlb:	call bol
+	pop r1
+	cmp edmarg(r4),r1
+	if hi,<
+	  sub r1,curptr(r4)
+	  jmp ctrlg1
+	  >
+	sub edmarg(r4),curptr(r4)
+	rts pc
+
+
+; ^D: Delete character (reject if at end of line or page).
+ctrld:	mov #-1,edmark(r4)	; reset mark
+	call eol
+	pop r1
+	push edmarg(r4)
+	cmp (sp),r1
+	if hi,<
+	  mov r1,(sp)
+	  >
+	call eupn
+	call dislin 		; display new line
+	cmp edmarg(r4),r1
+	if hi,<
+	  jmp ctrlg1
+	  >
+	rts pc
+
+
+; ^E: Move to end of line or page.
+ctrle:	call eol
+	add (sp)+,curptr(r4)
+	rts pc
+
+
+; ^F: Move right one character (reject if at end of line or page).
+ctrlf:	call eol
+	pop r1
+	cmp edmarg(r4),r1
+	if hi,<
+	  add r1,curptr(r4)
+	  jmp ctrlg1
+	  >
+	add edmarg(r4),curptr(r4)
+	rts pc
+
+
+; ^G: Reset ARG to 1.  Cancels ^U or ^V settings.
+ctrlg: 	mov #-1,edmark(r4)	; reset mark
+ctrlg1:	mov #%tdbel,-(sp)	; beep at user
+	jsr r5,typc
+	rts pc
+
+
+; ^I: Tab to the next tab stop.  (reject if beyond last stop on line.)
+ctrli:	mov r4,r0		; ptr to TABLST
+	add #tablst,r0		; ...
+loop <	  movb (r0)+,r1		; end of list?
+	  if eq,< 		; yes, reject request
+	    jmp ctrlg1
+	    >
+	  sub ehpos(r4),r1 	; test for tab stop greater than current
+	  dec r1		; position
+	  rptl le
+	  >
+	mov #40,r0		; set character to space
+	mov r1,edmarg(r4)	; set arg to no. of characters to next stop
+	jmp ichar		; go insert
+
+; ^K: Delete characters up to and including LF, or up to (but not including)
+; end of page.
+ctrlk:	mov #-1,edmark(r4)	; clear mark
+	mov curptr(r4),r0
+	mov r4,r1
+	add #..k+2,r1
+	clr ..k(r4)
+	clr -(sp)  		; set up character deletion count
+loop <	  cmp r0,curend(r4)
+	  exitl eq
+	  inc (sp)  		; count character for deletion
+	  cmp (sp),#l..k  	; room left?
+	  if los,<
+	    movb (r0),(r1)+  	; else store in ..K
+	    inc ..k(r4)  	; keep char count
+	    >
+	  cmpb (r0)+,#12  	; end of line?
+	  rptl ne
+	  dec edmarg(r4)  	; delete arg lines
+	  rptl ne
+	  >
+	call eupn  		; delete n characters (arg on stack)
+	call disres
+	tst edmarg(r4)
+	if gt,<
+	  jmp ctrlg
+	  >
+	rts pc
+
+
+; ^L: Clear screen, redisplay page, and position cursor.  This attempts to
+; recover from any display or count errors that may have occurred.
+ctrll:	tdtype clr  		; clear screen
+	push uoch(r4),pagep(r4)	; WRITEN args: channel id, ptr
+	push curend(r4)		; WRITEN arg: no. of characters
+	sub pagep(r4),(sp)	; ...
+	call writen
+	call emline		; print edit mode line
+	rts pc
+
+
+; ^M: Insert CRLF and display rest of page.  No display if no CRLF inserted.
+ctrlm:	clr r3
+
+icrlf:	mov #-1,edmark(r4)
+	push edmarg(r4)
+	asl (sp)
+	call edownn
+	pop r1
+	asr r1
+	if cs,<
+	  push #1
+	  call eupn
+	  >
+	tst r1
+	if ne,<
+	  mov curptr(r4),r2
+  loop <    movb #15,(r2)+
+	    movb #12,(r2)+
+	    sorl r1
+	    >
+	  call disres
+	  tst r3
+	  if eq,<
+	    mov r2,curptr(r4)
+	    >
+	  >
+	rts pc
+
+; ^N: Move to beginning of next line, or end of page.
+ctrln:	call eol
+	add (sp)+,curptr(r4)
+	add #2,curptr(r4)
+	cmp curptr(r4),curend(r4)
+	if hi,<
+	  mov curend(r4),curptr(r4)
+	  jmp ctrlg1
+	  >
+	dec edmarg(r4)
+	bne ctrln
+	rts pc
+
+
+; ^O: Insert CRLF, but keep current ptr before the CRLF.  Use of ^O's and ^N's
+; allows less redisplay.  No display if no CRLF inserted.
+ctrlo:	mov #1,r3
+	jmp icrlf
+
+
+; ^P: Move to beginning of previous line, or beginning of page.
+ctrlp:	call bol
+	sub (sp)+,curptr(r4)
+	sub #2,curptr(r4)
+	cmp curptr(r4),pagep(r4)
+	if lo,<
+	  mov pagep(r4),curptr(r4)
+	  jmp ctrlg1
+	  >
+	call bol
+	sub (sp)+,curptr(r4)
+	dec edmarg(r4)
+	bne ctrlp
+	rts pc
+
+
+; ^Q quotes next character, for inputting control characters.
+ctrlq:	jsr pc,readc  		; just read in the character
+	jmp ichar  		; and we should just be able insert it
+
+; ^R: Reverse character search.
+; 
+ctrlr:	jsr pc,readc  		; read char to search for
+	cmp r0,#'
+	if ne,<
+	  mov r0,schar(r4)
+	  >
+	mov curptr(r4),r1
+loop <	  cmp r1,pagep(r4)	; beginning of page?
+	  if los,<
+	    jmp ctrlg1		; yes, search fails
+	    >
+	  cmpb -(r1),schar(r4)  ; is next character it?
+	  rptl ne  		; no, keep searching
+	  mov r1,curptr(r4)	; set ptr to character
+	  dec edmarg(r4)
+	  rptl ne
+	  >
+	rts pc
+
+; ^S: Read a character and search for it <argument> times.  If not found, beep
+; and don't move cursor.  If found, move to after character.
+ctrls:	jsr pc,readc  		; read char to search for
+	cmp r0,#10		; ^H??
+	beq 1$
+	cmp r0,#'
+	if ne,<
+	  mov r0,schar(r4)
+	  >
+1$:	mov curptr(r4),r1
+loop <	  cmp r1,curend(r4)	; end of page?
+	  if eq,<
+	    jmp ctrlg1		; yes, search fails
+	    >
+	  cmpb (r1)+,schar(r4)  ; no, is next char it?
+	  rptl ne  		; no, keep searching
+	  mov r1,curptr(r4)
+	  dec edmarg(r4)
+	  rptl ne
+	  >
+	rts pc
+
+; ^U: Multiply <argument> by four.
+ctrlu:	asl edmarg(r4)		; multiply arg by four
+	asl edmarg(r4)		; ...
+	clr r1
+loop <	  jsr pc,readc  	; read character
+	  cmp r0,#'0  		; digit?
+	  exitl lo
+	  cmp r0,#'9
+	  exitl hi
+	  sub #'0,r0
+	  mul #10.,r1
+	  add r0,r1
+	  mov r1,edmarg(r4)  	; set last value set with ^V
+	  rptl
+	  >
+	mov r0,trerd(r4)  	; reread terminating char
+	pop *			; remove return PC from stack so can JMP back
+	jmp edpval 		; to edit-mode loop, past value resetting
+
+
+; ^V: Write current page, read in next.
+ctrlv:	jsr pc,wtpage		; write out current page
+	jsr pc,rdpage		; read in next page
+	dec edmarg(r4)		; do <argument> times
+	bne ctrlv
+	mov pagep(r4),curptr(r4)
+	mov #-1,edmark(r4)  	; no mark
+	jmp ctrll
+
+
+; ^W: Wipe out text between point and mark and save in ..K
+ctrlw:	mov edmark(r4),r1  	; get mark
+	cmp r1,#-1  		; see if valid
+	if eq,<
+	  jmp ctrlg1
+	  >
+	cmp r1,curptr(r4)  	; get mininum of point and mark
+	if lo,<
+	  mov curptr(r4),-(sp)
+	  mov r1,curptr(r4)
+	  mov (sp)+,r1
+	  >
+	clr r3  		; character count
+	mov r4,r2  		; address of ..K storage area
+	add #..k+2,r2  		; ...
+	sub curptr(r4),r1  	; no. of characters to wipe
+	beq 2$  		; do nothing for zero characters
+	cmp r1,#l..k
+	if hi,<
+	  mov #l..k,r1
+	  >
+	mov r1,r3
+	mov curptr(r4),r0  	; ptr to text to wipe
+loop <	  movb (r0)+,(r2)+  	; move to ..K
+	  sorl r3
+	  >
+	mov r1,..k(r4)  	; length of ..k in 1st word
+	push r1  		; EUPN arg: no. of chars
+	call eupn  		; move up text (i.e. delete)
+	call eposit		; position cursor
+	call disres		; display rest of page
+2$:	mov #-1,edmark(r4)
+	rts pc
+
+
+; ^X: Exchange mark and point.
+ctrlx:	cmp edmark(r4),#-1  	; valid mark?
+	if eq,<
+	  jmp ctrlg1   		; no, abort command
+	  >
+	mov curptr(r4),-(sp)
+	mov edmark(r4),curptr(r4)
+	mov (sp)+,edmark(r4)
+	rts pc
+
+; ^Y: Yank in text from ..K into buffer.
+ctrly:	mov ..k(r4),r2  	; get length of text in ..k
+	push r2
+	call edownn
+	pop r2
+	beq 2$
+	mov r4,r1
+	add #..k+2,r1
+	mov curptr(r4),r3
+loop <	  movb (r1)+,(r3)+  	; move
+	  sorl r2
+	  >
+	call disres		; display rest of page
+	mov r3,curptr(r4)  	; move to after inserted text
+	mov #-1,edmark(r4)
+2$:	rts pc
+
+
+; ^Z: Exit from EDIT-MODE.
+ctrlz:	pop *			; remove return PC from edit-mode loop
+	jmp cmline		; return to command mode
+
+
+; ^]: Read in numeric arg for next command.  No digits uses last arg
+; specified via ^].
+darg:	clr r1
+loop <	  jsr pc,readc  	; read character
+	  cmp r0,#'0  		; digit?
+	  exitl lo
+	  cmp r0,#'9
+	  exitl hi
+	  sub #'0,r0
+	  mul #10.,r1
+	  add r0,r1
+	  mov r1,edmlsv(r4)  	; set last value set with ^]
+	  rptl
+	  >
+	mov r0,trerd(r4)  	; reread terminating char
+	mov edmlsv(r4),r1  	; into register for MUL
+	mul edmarg(r4),r1  	; multiply by arg to ^]
+	mov r1,edmarg(r4)  	; set arg for next command
+	pop *			; remove return PC from stack so can JMP back
+	jmp edpval 		; to edit-mode loop, past value resetting
+
+.sbttl	Edit Mode subroutines
+
+; BOL returns the no. of characters between the beginning of the line
+; and point.
+
+;	ARGS:				VALS:
+;	(none)			 SP ->	no. of chars
+
+bol:	push (sp),r1		; make room for return value, save reg
+	mov curptr(r4),r1	; get current position of pointer into page
+	clr 4(sp)		; no characters yet
+loop <	  cmp r1,pagep(r4)	; at beginning of page????
+	  exitl eq		; yes, we finished our job
+	  cmpb -(r1),#12	; at beginning of line????
+				; (signified by a linefeed)
+	  exitl eq		; yes, finshed our job
+	  inc 4(sp)		; another character
+	  rptl			; mov backward through page
+	  >
+	pop r1			; restore reg
+	return
+
+; EOL returns the no. of characters between the end of the line and
+; point.
+
+;	ARGS:				VALS:
+;	(none)			 SP ->	no. of chars
+
+eol:	push (sp),r1		; make room for return value, save reg
+	mov curptr(r4),r1	; get current position of pointer into page
+	clr 4(sp)		; start off with 0 characters
+loop <	  cmp r1,curend(r4)	; at end of stuff in page????
+	  exitl eq		; yes, we've counted the number of characters
+	  cmpb (r1)+,#15	; found the end of the line????
+				; (signified by a carriage-return)
+	  exitl eq		; yes, finished our job
+	  inc 4(sp)		; another character counted
+	  rptl			; and continue forwards
+	  >
+	pop r1			; restore reg
+	return
+
+; EPOSIT calculates where the horizontal and vertical position of the
+; cursor and moves the cursor there.  It starts at the beginning of
+; the page and stops when it reaches the location of the cursor in the
+; page.
+
+eposit:	push r0,r1		; save regs
+	clr evpos(r4)		; start at line 0
+	clr ehpos(r4)		; start at column 0
+	mov pagep(r4),r1	; get pointer to beginning of page
+loop <	  cmp r1,curptr(r4)	; at cursor location yet???
+	  exitl eq		; yes, we're done.
+	  movb (r1)+,r0		; no, get the next character
+	  call ecsize		; and account for it's size
+	  rptl			; go back for more
+	  >
+	push uoch(r4)			; POSIT arg: channel id
+	push evpos(r4),ehpos(r4)	; POSIT args: vertical, horizontal
+	call posit		; position cursor
+	pop r1,r0		; restore regs
+	return
+
+
+; ECSIZE uses the character in R0 to determine the change in the
+; horizontal and vertical position caused by that character.
+
+ecsize:	inc r0			; hack so rubout is like control character
+	cmpb r0,#40+1		; printing character
+	if ge,<			; yes, normal garden variety
+	  dec r0		; unhack
+	  inc ehpos(r4)		; increment hpos by 1
+	  br 1$
+	  >
+	dec r0			; unhack
+	cmp r0,#11		; TAB?
+	if eq,<			; yes
+	  add #10,ehpos(r4)	; move to next tab stop
+	  bic #7,ehpos(r4)	; ...
+	  br 1$			; check for overflow
+	  >
+	cmp r0,#12		; LF?
+	if eq,<			; yes
+	  inc evpos(r4)		; move to next line
+	  return
+	  >
+	cmp r0,#15		; CR?
+	if eq,<
+	  clr ehpos(r4)		; move to beginning of line
+	  return
+	  >
+	add #2,ehpos(r4)	; random control character takes two positions
+1$:	cmp ehpos(r4),ehmax(r4)	; overflowed line length?
+	if his,<		; yes
+	  sub ehmax(r4),ehpos(r4)	; move to next line
+	  inc evpos(r4)			; ...
+	  >
+	return
+
+
+; Type the Edit Mode line
+
+emline:	push uoch(r4)		; POSIT arg: channel id
+	push evmax(r4)		; POSIT arg: vertical
+	sub #2,(sp)		; ...
+	push #0			; POSIT arg: horizontal
+	call posit		; position cursor at beginning of mode line
+	jsr r5,typsc
+	  .litrl <
+	    .byte %tdeos
+	    .asciz "Troll-R Editor -- {Edit ("
+	    >
+	tst overwr(r4)		; in overwrite mode
+	if ne,<			; yes
+	  jsr r5,typsc
+	  .litrl <
+	    .asciz "Overwrite"
+	    >
+	  >
+	else <			; nope
+	  jsr r5,typsc
+	  .litrl <
+	    .asciz "Insert"
+	    >
+	  >
+	push uoch(r4)		; IOAC arg: channel id
+	call ioac
+	  .string ^")}"
+	tstb wtflg(r4)		; write file open??
+	if ne,<			; yes, display page number
+	  push tpagen(r4),uoch(r4)
+	  call ioac
+	    .string ^" Page # ^d."
+	  >
+	return
+
+; EDOWNN creates room for the number of characters passed on the
+; stack. The characters between the end of the page and the cursor
+; pointer are moved to allow the characters to be inserted.
+;
+;	ARGS:				VALS:
+; SP ->	no. of chars		 SP ->	no. of chars
+
+edownn:	push r0,r1  		; move characters from current ptr
+	mov curend(r4),r0	; get pointer to end of stuff in page
+	mov r0,r1		; copy pointer
+	add 6(sp),r1		; figure the new end of the stuff
+	cmp r1,pagee(r4)	; will it go beyond the end of page
+	if hi,<			; yes, recalculate the number of characters
+	  mov pagee(r4),r1	; that there are room for
+	  mov r1,6(sp)
+	  sub curend(r4),6(sp)
+	  >
+	mov r1,curend(r4)	; save the pointer to the end of stuff
+				; in page
+loop <	  cmp r0,curptr(r4)	; up to current location?????
+	  exitl eq		; yes, we're done
+	  movb -(r0),-(r1)	; no, move the character and decrement
+				; the pointers
+	  rptl			; back for more
+	  >
+	pop r1,r0		; restore regs
+	return
+
+
+; EUPN moves up the number of specified characters by skipping that
+; number of characters before the cursor and move the rest of the
+; characters in the page up.
+
+;	ARGS:				VALS:
+; SP ->	no. of chars			(none)
+
+eupn:	push r0,r1  		; save regs
+	mov curptr(r4),r0  	; get text pointer
+	mov 6(sp),r1  		; get count of no. of characters to skip over
+	add r0,r1  		; r1 points text to be moved up
+loop <	  cmp r1,curend(r4)	; at the end of the stuff yet???
+	  exitl eq		; yes, we're done
+	  movb (r1)+,(r0)+	; no, transfer this character and bump
+				; pointers up
+	  rptl			; continue on
+	  >
+	mov r0,curend(r4)	; reset the end of the stuff
+	pop r1,r0,(sp)  	; restore regs, remove arg
+	return
+
+
+.sbttl Display routines
+
+; Display rest of page (after CURPTR).
+
+disres:	tdtype eos
+	push uoch(r4)		; WRITEN arg: channel id
+	push curptr(r4)		; WRITEN arg: ptr
+	push curend(r4)		; WRITEN arg: no. of characters
+	sub curptr(r4),(sp)	; ...
+	call writen
+	call emline		; display the edit mode line
+	return
+
+
+; Display rest of line.
+
+dislin:	push r0,r1,r2		; save reg
+	call bol		; see how far it is to beginning of line
+	pop r1			; val: no of chars
+	call eol		; get number of chars to end of line
+	pop r0			; val: number of chars
+	add r0,r1		; see if this line will cause or revoke wrap
+	mov ellen(r4),r2	; get line length from last display from
+				; before the command
+	cmp r1,r2		; current line longer than before
+	if gt,<			; yes if greater than
+	  cmp r1,ehmax(r4)	; did we go beyond the screen width?
+	  if ge,<		; yes, and was last line longer
+	    cmp ehmax(r4),r2	; screen?
+	    bge 1$		; no, so redisplay rest of screen
+	    >
+	  >
+	else <
+	  cmp r2,ehmax(r4)	; was last line longer than width of screen
+	  if ge,<		; yes
+	    cmp ehmax(r4),r1	; and this line less than the width of screen
+	    bge 1$		; yes, redisplay the whole screen
+	    >
+	  >
+	tdtype eol
+	push uoch(r4)		; WRITEN arg: channel id
+	push curptr(r4),r0	; WRITEN args: ptr, no. of characters
+	call writen
+	pop r2,r1,r0		; restore regs
+	return
+
+1$:	pop r2,r1,r0		; restore registers
+	br disres		; redisplay rest of screen
+
+.sbttl File routines
+
+; OPNRD opens a file for reading.
+
+opnrd:	push (sp)  		; create slot for return val (error code)
+	push pc			; ATTACH arg: device name
+	add #dskn-.,(sp)	; ....
+	push iofile(r4) 	; ATTACH arg: file name
+	push diskno(r4),#0	; ATTACH arg2: disk unit number,cbits
+	call attach  		; attach file for reading
+	pop drch(r4),2(sp)  	; vals: channel id, error code
+	if eq,<
+	  movb #-1,rdflg(r4)  	; set flag to show read file open
+	  >
+	rts pc
+
+; OPNWT opens a file for output.
+
+opnwt:	push (sp)  		; create slot for return val (error code)
+	push pc			; ATTACH arg: device name
+	add #dskn-.,(sp)	; ....
+	push iofile(r4)		; ATTACH arg: file name
+	push diskno(r4),#%icrea+%iupd	; ATTACH arg2: disk unit #,cbits
+	call attach  		; attach file for writing
+	pop dwch(r4),2(sp)  	; vals: channel id, error code
+	if eq,<
+	  movb #-1,wtflg(r4)  	; set flag to show write file open
+	  >
+	rts pc
+
+.sbttl	Terminal i/o
+
+; PEEKC reads the next character from the input channel and saves that
+; character as the next character to be read.  It returns the
+; character in R0 to the caller.
+
+peekc:	jsr pc,readc		; get character
+	mov r0,trerd(r4)	; cause character to be reread
+	rts r5
+
+; READC checks to see if there is a character to be reread and if not
+; reads the next character from the input channel.  If there is a
+; character to be reread it is used.  In either case the character is
+; returned in R0 to the caller and there will be no character to
+; reread.
+
+readc:	mov trerd(r4),r0  	; see if anything to reread
+	bpl 1$
+	push uich(r4)		; RCHAR arg: channel id
+	call rchar  		; read input character
+	pop r0  		; val: character
+1$:	mov #-1,trerd(r4)	; flush reread
+	rts pc
+
+
+; TYPSC prints the string from the relative pointer after the call
+; instruction.  It then outputs the string to the output channel.
+
+typsc:	push uoch(r4)		; WRITEZ arg: channel id
+	push r5			; calculate pointer to string to output
+	add (r5)+,(sp)		; ....
+	call writez		; print it out
+	rts r5
+
+; TYPC sends the character on the stack to the output channel.
+
+typc:	push uoch(r4),2+2(sp)	; WCHAR args: channel id, character
+	call wchar		; send it out to the world
+	pop (sp)		; remove arg
+	rts r5
+
+.sbttl	Constants
+
+hlpfil:	.rad50 "INF"
+	.rad50 "TROLLR"
+	.rad50 "HLP"
+
+newfil:	.rad50 "INF"
+	.rad50 "NEWS  "
+	.rad50 "TR "

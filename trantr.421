@@ -1,0 +1,1655 @@
+; TRANTOR - A PDP11 Multi-user Operating System   -*-PALX-*-
+tvn==%fnam2	; TRANTOR version number.
+
+.TITLE	TRANTOR
+
+; This is the Trantor Operating System, written for the M.I.T.
+; Applied Mathematics Department by Eugene Ciccarelli, Earl Killian,
+; and Charles Frankston. Maintained currently by Richard Lawhorn.
+
+; TRANTOR programming style and conventions:
+
+; [1] Subroutine calls and returns:
+
+; Subroutines are passed "arguments" and return "values" (or "ARGS" and
+; "VALS").  The caller pushes the args, and calls the subr by JSR R5,SUBR. 
+; The subroutine clears off all args from the stack and pushes any return
+; vals.  Thus the caller need not worry about cleaning up the stack after
+; return.  Often the last value is an error code; the operation requested
+; was successful if it is zero.  Also, a few subroutines may have several
+; returns showing various conditions and/or whether the subroutine action
+; was successful.  The use of multiple returns is discouraged.  If there
+; are multiple returns, the convention is that the last one be the normal
+; return, and the others exceptional or error returns.  Each return
+; ("RETURN1", "RETURN2", etc.) returns to a location 1-word beyond the
+; last return, and each return but the last should have its instruction
+; indented 2 spaces, e.g.:
+
+;	jsr r5,subr	; the subroutine call
+;	  br ret1	; return1
+;	  br ret2	; return2
+;	inc foo		; return3, normal
+
+
+; [2] Subroutine argument, value, return description:
+
+; It is important for reliability and readability that the arguments
+; and values of a subroutine be clearly identified at the subroutine
+; call.  Thus, arguments should be clearly identified by a comment at
+; the subroutine call or on the line preceeding (when pushing args) or
+; on the line popping args.  Usually it is clearer to use one PUSH
+; macro to push the args (one line, showing the list of args clearly),
+; and one POP macro to pop them, commented clearly to show the purpose
+; of the args, e.g.:
+
+;	push r1,#45	; ALOCW args: size of block, timeout
+;	jsr r5,alocw	; allocate a block of storage
+;	pop r2,r3	; vals: ptr to block, error code
+
+; Each subroutine should be well commented, both as a whole,
+; explaining the purpose and algorithm of the subroutine, and
+; line-by-line.  To facilitate quicker scanning of the source and
+; to allow TECO macros to get information about args, vals, and
+; returns, each subroutine should be preceeded by a comment section
+; like the following:
+
+;	ARGS:				VALS:
+; SP ->	no. of words		 SP ->	ptr to block
+;	timeout (60ths)			error code
+
+; This comment section should directly preceed the subroutine's
+; label.
+
+
+; [3] Position-independence
+
+; Separate modules should be written so that they are position-
+; independent relative to the other modules of the system.  Thus,
+; they may at some time be dynamically loaded.  When making an address to
+; position-indenpendent code, use a sequence such as the following:
+;	mov pc,-(sp)
+;	add #foo-.,(sp)		; now have ptr to foo on the stack.
+;	pop ptr			; put the ptr where you want it.
+; Be careful that the instruction sequence is compatible over the
+; pdp11 family:  "mov pc,foo" for instance is not.  The use of
+; the stack above insures compatibility.
+
+
+; [4] Preemption
+
+; Trantor does not currently preempt processes, however wherever
+; possible the code has been written so as to be preemtable.  Where
+; it is not, the routine should set priority 2 to indicate to any
+; future traffic controller that the routine must be allowed to
+; finish.  Priority 2 should be used for as short periods of time
+; as possible.  This is out of date!
+
+.sbttl	Definitions
+
+.insrt pdp11;defs >
+
+setf ^"Small system?",asm16k
+
+.if ne  asm16k
+.iif ndf  asmtek,  asmtek===0
+.iif ndf  asmplt,  asmplt===0
+setf ^"Trollr?",asmtrl
+setf ^"Console?",asmcns
+setf ^"User200?",asmcdc
+.endc
+
+
+ifMIT  <
+       .iif ndf  asmcdc,  asmcdc===1
+       .iif ndf  asmtek,  asmtek===1
+       .iif ndf  asmplt,  asmplt===1
+       .iif ndf  asmspp,  asmspp===0
+       >
+
+ifSAO  <
+       .iif ndf  asmcdc,  asmcdc===1
+       .iif ndf  asmtek,  asmtek===0
+       .iif ndf  asmplt,  asmplt===0
+       .iif ndf  asmspp,  asmspp===0
+       >
+
+.if eq   asmcdc
+	 ndp==0
+	 ndu==0
+.endc
+
+.iif ndf  asmtrl,  asmtrl===1
+.iif ndf  asmcns,  asmcns===1
+.iif ndf  asmrt1,  asmrt1===0		; if not defined we don't know RT11
+
+setf ^"Preemption?",asmpre
+
+ifMIT  <
+       setf ^"Input Peeking?",asmpek
+       setf ^"Experimental system?",sysexp	; experimental system???
+       >
+
+.iif ndf  sysexp, sysexp==0	; not an experimental system
+.iif ndf  fsmin,  fsmin==10	; minimum size for a leftover free block
+.iif ndf  asmpek,  asmpek===0	; no use for input peeking yet.
+
+
+
+.sbttl	Macros
+
+; The CRASH macro assembles into a BPT instruction, and also causes a .MSG
+; to be put into the error file with the CRASH argument, thus allowing the
+; message and the location to be associated and printed by a suitable TECO
+; macro.
+
+.macro	crash msg
+	bpt		; trap to syserr or rug
+	.if p1		; only print type crash msgs on pass 1
+	%ttyfl===%ttyfl+1
+	.msg	_C_ msg
+	%ttyfl===%ttyfl-1
+	.endc
+.endm
+
+
+; Define macro to handle software error conditions
+.macro	lose n
+	bpt
+.endm
+
+
+; Macros to disallow and allow preemption.
+.macro	peof
+	inc safety
+.endm
+
+.macro	peon
+	call tpeon
+.endm
+
+
+; The CALL macro expands into either a "JSR R5,SUBR" or
+; "JSR R5,@SUBR_LINK" depedning on whether or not SUBR
+; is defined in the current assembly.  Thus the CALL macro
+; provides a convienent interface to the dynamic linking
+; facility.
+
+.macro	call proc
+.nlist
+	.if p1
+%'proc===1
+	jsr r5,@1		; dummy JSR on pass 1
+append linkb,^|
+	.if ndf  proc		; create link block if external subr
+	.if ne  %'proc		; and if link block not already defined
+%'proc===.
+	.word 40		; link vector
+	.rad50	"proc  "	; rad50 of proc name
+.=%'proc+6
+	.endc
+	.endc
+	.iif p2,  %'proc===0
+|
+	.iff			; if pass 2
+	.iif df  proc,	jsr r5,proc
+	.ielse		jsr r5,@%'proc
+	.endc 			; pass 1 or 2 conditional
+.list
+.endm call
+
+.macro	call x
+	jsr r5,x
+.endm
+
+.macro	return
+	rts r5
+.endm
+
+.macro	retrn1
+	rts r5
+.endm
+
+.macro	retrn2
+	tst (r5)+
+	rts r5
+.endm
+
+.lif p1
+txtint linkb		; create link block
+
+.sbttl	Startup
+
+; When booted the system starts here at 1000.  The top of memory is
+; determined and the memory management module is initialized.  The system
+; is then started by creating the system process and transfering to it. 
+; The system process will do the rest of the work necessary to get the
+; system running. 
+
+stack==1000
+
+	.=stack			; code starts just above stack
+
+go:	spl 7			; set high priority so no interrupts
+	mov #stack,sp		; set stack ptr
+	br go2
+go1:	  mov pc,rugsta		; we're starting under a RUG debugger
+	  br go
+go2:::
+ifSAO  <
+	mov @#4,savnxm
+	mov @#6,savnxm+2
+	>
+	mov #nxmt,@#4
+	mov #pr7,@#6
+.if ne  pfail
+	push pc			; set power fail vector to POWERF
+	add #powerf-.,(sp)	; ...
+	pop @#24		; ...
+	mov #pr7,@#26		; power fail is PR7 of course!
+.endc
+	push pc			; set IOT vector to TC
+	add #tc-.,(sp)		; ...
+	pop @#20		; ...
+	mov #pr7,@#22		; TC runs at priority 0
+
+; Determine how much memory the machine has.
+
+	call catchn		; catch the nxm error
+	  1$-.			; nxm error catch addr
+	clr r1			; start test address at zero
+loop <	  add #4000,r1		; add 1K to test address
+	  tst (r1)		; keep testing until we get a NXM trap
+	  rptl			; ...
+	  >
+1$:	mov r1,memtop		; save address of first nxm
+	push pc			; FSINIT arg1: highest code location
+	add #last-.,(sp)	; as bottom of free storage area
+	push memtop		; FSINIT arg2: top of fs area to top of memory
+;;;	sub #6000,(sp)		; Leave room for BOOT
+	tst rugsta
+	if ne,<
+ifMIT <
+	  sub #45000,(sp)	; gotta leave room for RUG
+      >
+ifSAO <
+	  sub #56000,(sp)	; gotta leave room for RUG
+      >
+	  >
+	jsr r5,fsinit		; set up free-storage area
+.if df	swr
+	clr istswr		; check for switch register at runtime now,
+	call catchn		; for machines like /34 that may have one day,
+	  2$-.			; but not the next
+	tst @#swr		; this will go to 2$ if there is no swr
+	mov pc,istswr		; didn't trap, there must be one
+.endc
+
+2$:	clr npwrf		; reset power fail count
+	clr tpidct		; reset process-id counter
+	clr nproc		; reset active process counter
+	clr trun		; reset run queue
+	clr trunql		; set runq length to zero
+	clr tblock		; reset block queue
+	clr tblkql		; set blockq length to zero
+	clr tccnt+0		; reset no. of TC loops
+	clr tccnt+2		; ...
+	clr tpwake+0		; reset no. of process wakeups
+	clr tpwake+2		; ...
+	clr preemc+0		; reset no. of preemptions
+	clr preemc+2		; ...
+; for system metering
+	clr nobnrd		; clear number of blocks not read but accessed
+	clr notbmp		; clear no. of times bitmap was written
+	mov #1,safety		; no preemption until system is started!
+
+; Now create the system process.
+
+	push #0			; MAKEP arg: initial PC (meaningless)
+	jsr r5,makep		; create the system process
+	pop *,*			; vals: process id, error code
+	if ne,<
+	  crash ^"Can't create system process"
+	  >
+	jmp sysp		; start system
+
+
+memtop:	.blkw 1			; address of top of memory
+
+
+; CATCHN is called to setup for an expected nxm trap.
+; When the nxm trap occurs control will be passed to address
+; specified by a relative ptr after the call.
+
+catchn:	mov r5,@#nxmcat		; set catch for address specified
+	add (r5)+,@#nxmcat	; by relative ptr after call
+	return
+
+
+nxmt:	tst @#nxmcat
+	if eq,<
+	  halt
+	  rti
+	  >
+	mov @#nxmcat,(sp)
+	clr @#nxmcat
+	rti
+
+
+nxmcat==42			; NXM catch location used by BOOT
+
+
+pat: patch:	.blkw	100	; patch area
+
+.insrt pdp11;stuff
+
+.insrt pdp11;fsm
+
+.insrt pdp11;time
+
+.sbttl	Power fail handler
+
+.if ne  pfail
+; Traps here when AC LO is asserted on bus.  The registers
+; are saved on the stack and the SP is saved in a fixed place
+; so it can be restored after powerup.
+
+powerf:	push r5,r4,r3,r2,r1,r0	; save regs on stack
+	mov sp,pwrsp		; save sp in a fixed place
+	add #poweru-powerf,@#24	; set vector to power up routine
+	inc npwrf		; increment no. of power failures
+	halt
+ 
+
+; Comes here when power returns.  The registers are restored
+; and the processor resumes where it left off.
+
+poweru:	add #powerf-poweru,@#24	; set vector to power fail routine
+	mov pwrsp,sp		; restore stack ptr
+	peof			; turn off preemption
+	mov #100,@#lks		; turn on clock
+	spl 5			; allow clock interrupts
+	call dpwru		; powerup terminals
+.irp d,<rl,rk,rx,lp,dp,du>	; call RL,RK,RX,LP,DP, and DU powerup routines
+	.lif ne n'd
+	call d'pwru
+.endm
+	peon			; allow preemption again
+	pop r0,r1,r2,r3,r4,r5	; restore regs
+	rti			; continue execution
+
+pwrsp:	.blkw 1			; SP stored here during power failure
+.endc
+
+npwrf:	.blkw 1			; no. of power failures
+
+.sbttl	PCB Defintion
+ 
+;      The Traffic Controller maintains a Process Control Block (PCB)
+; for each process which contains all the information necessary to run
+; the process.  MAKEP creates a process by allocating and initializing
+; a PCB and adding it to the doubly linked circular list of PCBs.
+; PCB's are freed when the process is killed by KILLP.
+;      The PCB contains a process' complete state while it is not running.
+; The stack (and also the registers, PC and PS) are saved in a separate
+; block with a ptr in the PCB (see PCBSKP, PCBSKS and PCBSKM).  The first
+; word of the PCB is its queue link.  A process can be on either the run
+; queue, blocked queue, or neither; the first word is used to thread together
+; all processes on a given queue.  When a process is on the blocked queue
+; its PCB contains the conditions for it to be unblocked.  PCBLOC, PCBVAL,
+; and PCBWT specify a address, value and a relation to be true before the
+; process can be run.  PCBTL and PCBTH specify a time to unblock the process
+; if the other wait conditions are not satisfied (or if there are none).
+
+dsect <
+		.blkw 1		; queue link, ptr to next pcb in queue
+pcbfl::		.blkw 1		; ptr to pcb forward in ring
+pcbbl::		.blkw 1		; ptr to pcb backward in ring
+pcbid::		.blkw 1		; process ID
+pcbsts::	.blkw 1		; process status
+pcbloc::	.blkw 1		; location to wait on
+pcbval::	.blkw 1		; value for waiting
+pcbwt::		.blkw 1		; process waiting condition
+pcbtl::		.blkw 1		; low order time
+pcbth::		.blkw 1		; time to wait till, high order
+pcbskp::	.blkw 1		; ptr to save area for stack frame
+pcbskm::	.blkw 1		; size of save area (max size of sf)
+pcbsks::	.blkw 1		; size of sf
+pcbsup::	.blkw 1		; process id of superior
+pcbui::		.blkw 1		; user input channel
+pcbuo::		.blkw 1		; user output channel
+	>,pcblen
+
+
+; Stack offsets (for debugging purposes).
+pskps==16		; offset of PS on process stack
+pskpc==14		; offset of PC on process stack
+
+; Process states.
+%psblk==1		; blocked
+%psrun==2		; running
+%psstp==200		; stopped
+
+.sbttl	Traffic controller
+
+; TC is called by the TC wait handlers to suspend the current process
+; and select another to run.  TC saves the current process' stack, and
+; puts the current process onto the end of the blocked queue.  TC then
+; scans the blocked queue for runnable processes and moves them to the
+; run queue.  Finally TC selects the first process on the run queue
+; and restarts it.  Call by IOT.
+
+
+tc:	mov #30.,tquant		; give us a quantum just to prevent
+				; aborted preemptions from cluttering
+				; statistics
+	mov #1,safety		; no preemption while in TC!
+	spl 0			; can run at PR0 now
+	cmp sp,#stack		; check for stack underflow
+	if hi,<
+	  mov sp,tunsp		; save rotten stack ptr
+	  mov #stack,sp		; restore valid stack ptr
+	  push #0,#0		; fake a PS and PC
+	  lose %eunsk		; give stack underflow error trap
+	  >
+	jsr r5,save6		; save regs
+	mov trun,r0		; get ptr to process' PCB (head of run queue)
+	mov #stack,r2		; calculate stack size
+	sub sp,r2		; ...
+	asr r2			; halve to get no. of words
+	cmp r2,pcbskm(r0)	; stack too big to save?
+	if hi,<
+	  lose %eovsk		; give stack overflow error trap
+	  >
+	mov r2,pcbsks(r0)	; save size in pcb
+	mov pcbskp(r0),r1	; ptr to stack save area
+loop <	  mov (sp)+,(r1)+	; move sf into save area
+	  sorl r2		; ...
+	  >
+
+; Move process from run queue to blocked queue.
+
+	mov (r0),trun		; remove from run queue
+	clr (r0)		; clear queue link word
+	dec trunql		; decrement no. of processs on runq
+	bitb #%psstp,pcbsts(r0)	; process stopping itself?
+	if eq,<			; no, move from runq to blockq
+	  movb #%psblk,pcbsts(r0)	; change status of process to blocked
+	  mov pc,r1		; get ptr to blockq
+	  add #tblock-.,r1	; ...
+  loop <    mov r1,r2		; find end of blocked queue
+	    mov (r1),r1
+	    rptl ne
+	    >
+	  mov r0,(r2)		; put process on end
+	  inc tblkql		; increment no. of processes on blockq
+	  >
+
+; Find a new process to run.
+
+tcloop:	mov #30.,tquant		; give us a quantum just to prevent
+				; aborted preemptions from cluttering
+				; statistics
+.lif df  lks
+	bis #100,@#lks		; make sure timer is on
+.if df	swr
+	tst istswr		; is there a switch register?
+	if ne,<
+	  bit #1,@#swr		; sw 0 up?
+	  if ne,<
+	    bpt			; yes, call rug
+	    >
+	  >
+.endc
+	add #1,tccnt+0		; keep tally of times around ring
+	adc tccnt+2		; ...
+	clr intflg		; ints will set this flag and force
+				; another scan of blocked processes
+
+; Move all runnable processes from blocked queue to run queue.
+
+	mov pc,r1		; get ptr to head of runq
+	add #trun-.,r1		; ...
+loop <	  mov r1,r2		; find end of runq
+	  mov (r1),r1
+	  rptl ne
+	  >
+; Ptr to end of runq in R2.
+	mov pc,r1		; get ptr to head of blockq
+	add #tblock-.,r1	; ...
+	call uptime		; get time to check timeouts
+	pop r3,r4		; UPTIME vals: hi,lo 
+loop <	  mov (r1),r0		; ptr to next pcb on blockq
+	  exitl eq		; done if ptr is null
+	  add pcbwt(r0),pc	; dispatch on TC wait condition
+t0:	  cmp @pcbloc(r0),pcbval(r0)	; CMP-NE test
+	  bne tub
+	  br toff
+t1:	  cmp @pcbloc(r0),pcbval(r0)	; CMP-HI test
+	  bhi tub
+	  br toff
+t2:	  bit pcbval(r0),@pcbloc(r0)	; BIT-NE test
+	  bne tub
+	  br toff
+t3:	  bit pcbval(r0),@pcbloc(r0)	; BIT-EQ test
+	  beq tub
+	  br toff
+t4:	  cmp @pcbloc(r0),pcbval(r0)	; CMP-EQ test
+	  beq tub
+; Process is "off" (i.e. either no on condition or on condition not satisfied).
+toff:	  cmp pcbth(r0),r3	; check if pcb's time has come
+	  blo tub
+	  if eq,<		; high order of times the same
+	    cmp pcbtl(r0),r4	; so check low orders
+	    blo tub
+	    >
+	  mov r0,r1		; save ptr to this PCB
+	  rptl			; check next process
+; Unblock process, i.e. move from blockq to runq.
+tub:	  cmpb pcbsts(r0),#%psblk	; error check: process really blocked?
+	  if ne,<
+	    crash ^"Blocked process isn't"
+	    >
+	  add #1,tpwake+0	; increment the no. of process wakeups
+	  adc tpwake+2		; ...
+	  mov #177777,pcbth(r0)	; set infinite until time
+	  mov #177777,pcbtl(r0)	; ...
+	  mov #tub-t0,pcbwt(r0)	; no on condition anymore
+	  mov (r0),(r1)		; remove from blockq
+	  dec tblkql		; decrement blockq length
+	  movb #%psrun,pcbsts(r0)	; change status of process to running
+	  clr (r0)		; add to runq
+	  mov r0,(r2)		; ...
+	  mov r0,r2		; update ptr to end of runq
+	  inc trunql		; increment runq length
+	  rptl			; continue scanning blockq
+	  >
+
+; Run first process on run queue.
+
+	mov trun,r0		; ptr to first process on runq
+	if eq,<			; runq is empty
+	  spl 7			; check INTFLG at high priority
+	  tst intflg		; ints since scanned blockq?
+	  bne tcloop		; yes, scan again
+	  push #pr3		; no, push PS for RTT
+	  jsr pc,3$		; and a PC
+	  wait			; sleep until interrupt
+	  br tcloop		; yawn! int, so scan blockq again
+3$:	  rtt			; set pr3 and execute wait without int
+	  >
+
+; Copy stack frame from save area onto stack.
+
+	mov pcbsks(r0),r2	; size of saved stack
+	mov r2,r1		; make ptr to end of stack
+	asl r1			; ...
+	add pcbskp(r0),r1	; ...
+loop <	  mov -(r1),-(sp)	; copy saved stack onto stack
+	  sorl r2		; ...
+	  >
+	jsr r5,rest6		; restore regs
+	mov #30.,tquant		; preemption will occur on 30th clock interrupt
+	clr safety		; preemption allowable
+	rti
+
+
+; TPEON is called by the PEON macro to decrement the no-preemption count.
+tpeon:	tst tquant		; Is preemption pending?
+	if gt,<			; no
+	  dec safety		; decrement safety level
+	  bmi 1$		; error if level goes negative
+	  return
+	  >
+; Preemption pending
+	dec safety		; decrement safety level
+	bmi 1$			; error if level goes negative
+	if eq,<			; safety down to zero so preempt ourselves
+	  iot			; by calling TC
+	  >
+	return
+1$:	crash ^"PEON with preemption already on"
+	return
+
+
+tunsp:	.blkw 1			; SP of last stack underflow
+trunql:	.blkw 1			; no. of processes on runq
+tblkql:	.blkw 1			; no. of processes on blockq
+tccnt:	.blkw 2			; no. of times around tcloop
+tpwake:	.blkw 2			; no. of process wakeups
+trun:	.blkw 1			; ptr to run queue
+tblock:	.blkw 1			; ptr to blocked queue
+
+intflg:	.blkw 1			; flag set when interrupt occurs
+safety:	.blkw 1			; nonzero if preemption inhibited
+tquant:	.blkw 1			; no. of time quanta remaining
+timout:	.blkw 2			; no. of times processes ran over quantum
+preemc:	.blkw 2			; no. of preemptions
+
+ifSAO	<
+savnxm:	.blkw 2			; saved locations 4 and 6 when we were entered
+>
+
+rugsta:	.blkw 1			; non-zero indicates we were entered from RUG
+istswr:	.blkw 1			; non-zero iff there is a switch register
+
+.sbttl	TC wait handlers
+
+; This section handles the process-wait system calls.  Each of these calls
+; causes the running process to be suspended (and another picked to run),
+; waiting for some condition to be true before the process can again be
+; run.  Basically, a process can wait ON a location (until that location
+; changes in some way from a specified value); or a process can wait UNTIL
+; or FOR a certain amount of time.  In addition, timeouts can be effected
+; on a wait ON by combinin the ON and UNTIL (or ON and FOR), in which case
+; the process can be run as soon as either condtion is satisfied. 
+
+; Note that UNTIL times are 2-word absolute binary times (as returned
+; by UPTIME), while FOR times are 1-word relative binary times (relative
+; to now).
+
+
+; FOR: wait for a certain time.  Translated into a wait UNTIL.
+
+;	ARGS:				VALS:
+; SP ->	delta-time			(none)
+
+twfor:	mov #1,safety		; turn off preemption
+	push (sp)		; create slot for 2-word absolute time
+	call uptime		; get current 2-word binary time
+	mov (sp)+,4(sp)		; put in hi-order time
+	add (sp)+,4(sp)		; add in lo-order time to offset
+	adc 2(sp)		; add carry to hi-order time
+; wait FOR is now the equivilant wait UNTIL.
+
+
+; UNTIL: wait until a certain time.
+
+;	ARGS:				VALS:
+; SP ->	time hi				(none)
+;	time lo
+
+twtil:	mov #1,safety		; turn off preemption
+	push r0			; save reg
+	mov trun,r0		; ptr to process' PCB
+	mov 4(sp),pcbth(r0)	; hi order time
+	mov 6(sp),pcbtl(r0)	; lo order time
+	mov #toff-t0,pcbwt(r0)	; so not waiting on any locations
+	pop r0,(sp),(sp)	; restore reg, remove args from stack
+	iot			; call traffic controller
+	return
+
+
+; TSTOT: set timeout time for next WAIT ON call.
+
+;	ARGS:				VALS:
+; SP ->	time hi				(none)
+;	time lo
+
+tstot:	mov #1,safety		; turn off preemption
+	push r0			; save reg
+	mov trun,r0		; ptr to process' PCB
+	mov 4(sp),pcbth(r0)	; hi order time
+	mov 6(sp),pcbtl(r0)	; lo order time
+	pop r0,(sp),(sp)	; restore reg, remove args from stack
+	return
+
+
+; ON-NE: wait until contents of address are different from value.
+
+;	ARGS:				VALS:
+; SP ->	value				(none)
+;	address
+
+twonne:	cmp @4(sp),2(sp)	; wait condition already satisfied?
+	if ne,<			; yes, return immediately
+	  pop (sp),(sp)		; remove args from stack
+	  return
+	  >
+	push #0			; TC code for CMP-NE (offset of test from T0)
+	br twon
+
+
+; ON-HI: wait until contents of address are higher than value.
+
+;	ARGS:				VALS:
+; SP ->	value				(none)
+;	address
+
+twonhi:	cmp @4(sp),2(sp)	; wait condition already satisfied?
+	if hi,<			; yes, return immediately
+	  pop (sp),(sp)		; remove args from stack
+	  return
+	  >
+	push #t1-t0		; TC code for CMP-HI (offset of test from T0)
+	br twon
+
+
+; ON-BN: wait until specified bit of address is on.
+
+;	ARGS:				VALS:
+; SP ->	bit				(none)
+;	address
+
+twonbn:	bit 2(sp),@4(sp)	; wait condition already satisfied?
+	if ne,<			; yes, return immediately
+	  pop (sp),(sp)		; remove args from stack
+	  return
+	  >
+	push #t2-t0		; TC code for BIT-NE (offset of test from T0)
+	br twon
+
+
+; ON-BE: wait until specified bit of address is off.
+
+;	ARGS:				VALS:
+; SP ->	bit				(none)
+;	address
+
+twonbe:	bit 2(sp),@4(sp)	; wait condition already satisfied?
+	if eq,<			; yes, return immediately
+	  pop (sp),(sp)		; remove args from stack
+	  return
+	  >
+	push #t3-t0		; TC code for BIT-EQ (offset of test from T0)
+	br twon
+
+
+; ON-EQ: wait until contents of address are same as value.
+
+;	ARGS:				VALS:
+; SP ->	value				(none)
+;	address
+
+twoneq:	cmp @4(sp),2(sp)	; wait condition already satisfied?
+	if eq,<			; yes, return immediately
+	  pop (sp),(sp)		; remove args from stack
+	  return
+	  >
+	push #t4-t0		; TC code for CMP-EQ (offset of test from T0)
+	br twon
+
+
+; TWON is the common code for the wait-on TC calls.
+twon:	mov #1,safety		; turn off preemption
+	push r0			; save reg
+	mov trun,r0		; ptr to this process's pcb
+	mov 10(sp),pcbloc(r0)	; save location, value to
+	mov 6(sp),pcbval(r0)	; wait on
+	mov 2(sp),pcbwt(r0)	; set wait condtion
+	pop r0,*,(sp),(sp)	; restore reg, remove TC code and args
+	iot			; call trafic controller
+	return
+
+
+; AWAIT implements mutual exclusion using event counters.  Its argument
+; is a ptr to a two word block.  The first word is the event counter
+; which is incremented each time a process gives up its exclusion.  The
+; second word is used to generate tickets.  AWAIT reads the current
+; ticket value and then increments it.  It then waits for the event
+; counter to become equal to its ticket.
+
+;	ARGS:				VALS:
+; SP ->	ptr to ec and tc		(none)
+
+await:	push r1			; save reg
+	mov 4(sp),r1		; ptr to ec and ticket counter
+	peof			; turn off preemption while we get ticket
+	push r1,2(r1)		; TWONEQ args: address, value
+	inc 2(r1)		; took ticket, now increment ticket counter
+	peon			; allow preemption again
+	call twoneq		; wait for ec to equal out ticket
+	pop r1			; restore reg
+	return
+
+.sbttl	Process Manipulation
+
+; MAKEP, creates new processes given an initial PC.  The new process
+; is given an initial stack of 50 words; its state is "stopped".
+; A unique process id is also assigned and returned; this id may be
+; converted to a PCB ptr via the PCBPTR subroutine.
+
+;	ARGS:				VALS:
+; SP ->	Initial PC		 SP ->	process id
+;					error code
+
+
+makep:	push (sp)		; slot for error code
+	jsr r5,save6		; save regs
+	mov 20(sp),r4		; initial PC
+	clr 16(sp)		; return a zero process id if error
+	push #pcblen/2,#2*60.	; ALOCW args: size in words, timeout
+	call alocw		; allocate a pcb for process
+	pop r0,20(sp)		; vals: ptr, error code
+	bne 1$			; return if couldn't get storage
+	push #50.,#2*60.	; ALOCW args: size in words, timeout
+	call alocw		; allocate stack save area
+	pop r1,20(sp)		; vals: ptr, error code
+	if ne,<			; couldn't get save area, release pcb
+	  push r0		; FREE arg: ptr to storage
+	  call free		; free pcb storage
+	  br 1$
+	  >
+	mov r4,pskpc(r1)	; set initial PC
+	mov r1,pcbskp(r0)	; set ptr to stack save area
+	mov #50.,pcbskm(r0)	; and its size
+	mov #8.,pcbsks(r0)	; set sf size to 8 (six regs + pc + ps)
+	mov #177777,pcbtl(r0)	; set until time infinite
+	mov #177777,pcbth(r0)	; ...
+	mov #tub-t0,pcbwt(r0)	; no wait condition
+	mov #%psrun+%psstp,pcbsts(r0)	; set stopped running status
+	call getpid		; get process id
+	pop pcbsup(r0)		; val: process id (save superior's id in PCB)
+	peof			; turn off preemption
+	inc tpidct		; increment process id count
+	mov tpidct,pcbid(r0)	; use count as process id
+	mov tpidct,16(sp)	; return process id as well
+	mov trun,r1		; ptr to pcb ring
+	if ne,<
+	  mov pcbfl(r1),pcbfl(r0)	; put new pcb into ring
+	  mov r1,pcbbl(r0)
+	  mov r0,pcbfl(r1)
+	  mov pcbfl(r0),r1
+	  mov r0,pcbbl(r1)
+	  >
+	else <			; no current process (i.e. creating SYSP)
+	  mov r0,pcbfl(r0)	; set forward link to self
+	  mov r0,pcbbl(r0)	; set backward link to self
+	  bicb #%psstp,pcbsts(r0)	; clear stop bit for SYSP
+	  mov r0,trun		; put PCB on runq
+	  inc trunql		; increment runq length
+	  >
+	inc nproc		; increment no. of processes
+	peon			; allow preemption again
+1$:	jsr r5,rest6		; restore regs
+	return
+
+tpidct:	.blkw 1			; counter of processes
+
+
+; STOPP stops a process.  The process is removed from the run or block
+; queue and stopped.
+
+;	ARGS:				VALS:
+; SP ->	process id		 SP ->	error code
+
+stopp:	jsr r5,save6		; save regs
+	push 16(sp)		; PCBPTR arg: process id
+	jsr r5,pcbptr		; get ptr to PCB
+	pop r0,16(sp)		; vals: ptr, error code
+	bne 1$
+	peof			; turn off preemption
+	cmp r0,trun		; stop self?
+	if eq,<
+	  bisb #%psstp,pcbsts(r0)	; set stop bit
+	  iot			; call TC
+	  br 1$			; we were continued, just return
+	  >
+	cmpb pcbsts(r0),#%psrun	; running?
+	if eq,<
+	  jsr r5,rmpq		; remove from run queue
+	    trun-.		; relative ptr to runq
+	  dec trunql		; decrement runq length
+	  >
+	cmpb pcbsts(r0),#%psblk	; blocked?
+	if eq,<
+	  jsr r5,rmpq		; remove from block queue
+	    tblock-.		; relative ptr to blockq
+	  dec tblkql		; decrement blockq length
+	  >
+	bisb #%psstp,pcbsts(r0)	; set stop bit
+	peon			; allow preemption again
+1$:	jsr r5,rest6		; restore regs
+	return
+
+rmpq:	mov r5,r1		; pick up relative ptr after call and
+	add (r5)+,r1		; make absolute
+loop <	  cmp (r1),r0		; this the process?
+	  exitl eq
+	  mov (r1),r1		; no, next
+	  rptl ne
+	  crash ^"Process not on queue"
+	  >
+	mov (r0),(r1)		; remove from queue
+	rts r5
+
+
+; STARTP starts a stopped process running.
+
+;	ARGS:				VALS:
+; SP ->	process id		 SP ->	error code
+
+startp:	jsr r5,save6		; save regs
+	push 16(sp)		; PCBPTR arg: process id
+	jsr r5,pcbptr		; get ptr to PCB
+	pop r0,16(sp)		; vals: ptr, error code
+	bne 1$
+	peof			; turn off preemption
+	bitb #%psstp,pcbsts(r0)	; make sure process is actually stopped
+	if eq,<
+	  lose 0
+	  >
+	bicb #%psstp,pcbsts(r0)	; clear stop bit
+	cmpb pcbsts(r0),#%psrun	; running or blocked?
+	if eq,<
+	  jsr r5,appq		; append to runq
+	    trun-.
+	  inc trunql		; increment runq length
+	  >
+	else <
+	  jsr r5,appq		; append to blockq
+	    tblock-.
+	  inc tblkql		; increment blockq length
+	  >
+	peon			; allow preemption again
+1$:	jsr r5,rest6		; restore regs
+	return
+
+appq:	mov r5,r1		; convert relative ptr after call
+	add (r5)+,r1		; to absolute ptr
+	clr (r0)		; null queue ptr in this PCB
+loop <	  mov r1,r2		; search for end of queue
+	  mov (r1),r1		; ...
+	  rptl ne		; ...
+	  >
+	mov r0,(r2)		; link onto end of queue
+	rts r5
+
+
+; KILLP kills a process.  The PCB and stack are freed.
+
+;	ARGS:				VALS:
+; SP ->	process id		 SP ->	error code
+
+killp:	jsr r5,save6		; save regs
+	push 16(sp)		; PCBPTR arg: process id
+	jsr r5,pcbptr		; convert id to ptr
+	pop r0,16(sp)		; vals: ptr, error code
+	bne 1$
+	bitb #%psstp,pcbsts(r0)	; process stopped?
+	if eq,<
+	  mov #%estjb,16(sp)	; no, error
+	  br 1$
+	  >
+	peof			; turn off preemption
+	mov pcbbl(r0),r1	; ptr to previous PCB on list
+	mov pcbfl(r0),r2	; ptr to next PCB on list
+	mov r2,pcbfl(r1)	; link next to previous
+	mov r1,pcbbl(r2)	; link previous to next
+	peon			; allow preemption again
+	push pcbskp(r0)		; FREE arg: ptr
+	call free		; free stack
+	push r0			; FREE arg: ptr
+	call free		; free PCB
+	dec nproc		; decrement no. of processes
+1$:	jsr r5,rest6		; restore regs
+	return
+
+
+; SETSS sets the size of a process' stack.
+
+;	ARGS:				VALS:
+; SP ->	size in words		 SP ->	error code
+;	process id
+
+setss:	jsr r5,save6		; save regs
+	mov 16(sp),r5		; get desired size
+	push 20(sp)		; PCBPTR arg: process id
+	jsr r5,pcbptr		; convert process id to PCB ptr
+	pop r0,20(sp)		; vals: pcb ptr, error code
+	bne 1$
+	push r5,#2*60.		; ALOCW args: size, timeout
+	call alocw		; allocate new stack
+	pop r1,20(sp)		; vals: ptr, error code
+	bne 1$
+	cmp r0,trun		; setting stack size of current process?
+	if ne,<			; no, copy stack
+	  mov pcbskp(r0),r2	; ptr to old stack
+	  mov r1,r3		; ptr to new stack
+	  mov pcbsks(r0),r4	; size
+	  cmp r4,r5		; new stack smaller than necessary?
+	  if hi,<
+	    mov #%eovsk,20(sp)	; stack overflow error
+	    br 1$
+	    >
+  loop <    mov (r2)+,(r3)+	; copy
+	    sorl r4
+	    >
+	  >
+	mov pcbskp(r0),r2	; ptr to old stack
+	mov r1,pcbskp(r0)	; now use new stack
+	mov r5,pcbskm(r0)	; new size
+	push r2			; FREE arg: ptr
+	call free		; release old stack
+1$:	jsr r5,rest6		; restore regs
+	pop (sp)		; remove arg from stack
+	return
+
+
+; PCBPTR converts a process id into a PCB ptr.  A process id of 0
+; gives a ptr to the current process' PCB.
+
+;	ARGS:				VALS:
+; SP ->	process id		 SP ->	PCB ptr
+;					error code
+
+pcbptr:	push (sp),r0,r1		; create result slot, save regs
+	mov 10(sp),r1		; process id zero?
+	if ne,<
+	  mov trun,r0		; get a ptr to current process' PCB
+	  clr 10(sp)		; no error yet
+	  peof			; turn off preemption while scanning ring
+  loop <    cmp pcbid(r0),r1	; this the one?
+	    exitl eq
+	    mov pcbfl(r0),r0	; get next process in ring
+	    cmp r0,trun		; back to beginning?
+	    rptl ne
+	    mov #%ensjb,10(sp)	; PCB id not found
+	    >
+	  peon			; allow preemption again
+	  mov r0,6(sp)		; return ptr to PCB
+	  >
+	else <
+	  mov trun,6(sp)	; PCB ptr for current process
+	  clr 10(sp)		; no error
+	  >
+	pop r1,r0		; restore regs
+	return
+
+
+; GETPID returns the process id of the currently running job.
+
+;	ARGS:				VALS:
+;	(none)			 SP ->	process id
+
+getpid:	push (sp),r0		; make slot for return val, save reg
+	mov trun,r0		; get ptr to PCB of running process
+	mov pcbid(r0),4(sp)	; return process id
+	pop r0			; restore reg
+	return
+
+
+; SETUIO sets the user input and user output channels for a process.
+
+;	ARGS:				VALS:
+; SP ->	user output ch		 SP ->	error code
+;	user input ch
+;	process id
+
+setuio:	push r0			; save reg
+	push 10(sp)		; PCBPTR arg: process id
+	call pcbptr		; convert process id arg to PCB ptr
+	pop r0,10(sp)		; vals: PCB ptr, error code
+	bne 1$
+	mov 6(sp),pcbui(r0)	; set user input channel
+	mov 4(sp),pcbuo(r0)	; set user output channel
+1$:	pop r0,(sp),(sp)	; restore reg, remove args from stack
+	return
+
+
+; GETUIO returns the user input and user output channels for a process.
+
+;	ARGS:				VALS:
+; SP ->	process id		 SP ->	user output channel
+;					user input channel
+;					error code
+
+getuio:	push (sp),(sp),r0	; save reg, make two return value slots
+	push 10(sp)		; PCBPTR arg: process id
+	call pcbptr		; convert process id arg to PCB ptr
+	pop r0,10(sp)		; vals: PCB ptr, error code
+	bne 1$
+	mov pcbui(r0),6(sp)	; return user input channel
+	mov pcbuo(r0),4(sp)	; return user output channel
+1$:	pop r0			; restore reg
+	return
+
+
+; GETUI returns the user input channel for the executing process.
+
+;	ARGS:				VALS:
+;	(none)			 SP ->	channel id
+
+getui:	push (sp),r0		; make slot for return value, save reg
+	mov trun,r0		; get ptr to executing process' PCB
+	mov pcbui(r0),4(sp)	; return user input channel id
+	pop r0			; restore reg
+	return
+
+
+; GETUO returns the user output channel for the executing process.
+
+;	ARGS:				VALS:
+;	(none)			 SP ->	channel id
+
+getuo:	push (sp),r0		; make slot for return value, save reg
+	mov trun,r0		; get ptr to executing process' PCB
+	mov pcbuo(r0),4(sp)	; return user output channel id
+	pop r0			; restore reg
+	return
+
+.sbttl	Storage Allocation
+
+
+; ALOCW returns a ptr to a block of storage of the requested size.
+; If the allocation cannot be made in the specified time the call
+; fails.
+
+;	ARGS:				VALS:
+; SP ->	timeout			 SP ->	Ptr to block allocated
+;	size				error code
+
+alocw:	jsr r5,save6		; save regs
+	call uptime		; get current time
+	pop r4,r3		; UPTIME vals: hi, lo time
+	add 16(sp),r3		; add to low order time
+	adc r4			; add to hi order
+loop <	  push 20(sp)		; ALLOC arg1: no. of words to alloc
+	  call getpid		; ALLOC arg2: caller's id
+	  mov fsmctr,r0		; get current value so can wait on it to
+				; change if we can't get the memory now
+	  call alloc		; try to allocate the memory
+	  pop 16+2(sp),20(sp)	; vals: ptr, error code
+	  if ne,<
+	    push r3,r4		; TSTOT args: time lo, time hi
+	    call tstot		; set timeout on next wait
+	    push pc		; TWONNE arg1: location to wait on
+	    add #fsmctr-.,(sp)	; ...
+	    push r0		; TWONNE arg2: value to change from
+	    call twonne		; wait on FSMCTR or until timeout time
+	    cmp fsmctr,r0	; see if changed
+	    rptl ne		; fsmctr changed, indicating someone
+	    >			; freed some memory
+	  >
+	jsr r5,rest6		; restore regs
+ 	return
+
+
+; ALOCL returns a ptr to a block of storage of the requested size.
+; It uses the standard storage allocator with a timeout of 2 seconds
+; and bombs if it can't get the memory.
+
+;	ARGS:				VALS:
+; SP ->	size			 SP ->	ptr to block
+
+alocl:	push 2(sp),#2*60.	; ALOCW args: size, timeout
+	jsr r5,alocw		; find area
+	pop 2+2(sp),*		; pop ptr, test error code
+	if ne,<
+	  lose %enacr		; couldn't satisfy request
+	  >
+	return
+
+.sbttl System process
+; The system process calls various device initializers and starts
+; all the processes contained in PLIST, a list of initial PC's.
+
+sysp:	push #0,#80. 		; SETSS args: process id, size
+	call setss 		; set our stack size large
+	pop * 			; val: error code
+	if ne,<
+	  lose 0
+	  >
+
+; Call module initialization routines
+
+	call tiinit		; time module
+	call ioinit		; init IO module
+	call alinit		; asynchronous line module
+	call dkinit		; Disk DIM
+
+; Call device initialization routines
+
+	spl 5			; initialize rest of devices at PR5
+
+	call dinit		; initialize KL, DL, DZ
+.irp d,<rl,rk,rx,lp,dp,du>	; call RL,RK,RX,LP,DP, and DU initialization
+	.lif ne n'd
+	call d'init
+.endm
+
+	call ttinit		; TTY DIM
+
+	spl 0			; ready for interrupts
+	mov #30.,tquant		; set time quantum to avoid immediate
+				; preemption
+	clr safety		; allow preemption (though nothing else
+				; to run yet!)
+
+; Attach each terminal.  Save channel id in TTYCH array.
+
+	mov pc,r2		; ptr to TTYCH
+	add #ttych-.,r2		; ...
+	clr r1			; starting terminal no. (system console)
+loop <	  clr pidtb-ttych(r2)	; clear process id table too
+	  clr prqtb-ttych(r2)	; clear process request table too
+	  push pc		; ATTACH arg1: device name
+	  add #ttyn-.,(sp)	; ...
+	  push #0,r1,#%tcniwt	; ATTACH args 2,3 and 4:file name,unit #,cbits
+	  call attach		; attach system console
+	  pop (r2)+,r0		; vals: channel id, error code
+	  if ne,<
+	    crash ^"Can't attach TTY"
+	    >
+	  inc r1		; next TTY no.
+	  cmp r1,#ntty		; attached all the TTYs?
+	  rptl lo
+	  >
+	push ttych+0,#%tdclr	; WCHAR args: channel id, character
+	call wchar		; clear screen of system console (type CRLF)
+
+; Mount system disk
+
+	push #0			; MOUNT arg: disk no.
+	call mount		; prepare file system for use on system disk
+	pop r0			; val: error code
+	if ne,<
+	  push r0		; IOA arg: error code
+	  push ttych+0		; IOA arg: channel id
+	  call ioac
+	    .string ^"Can't mount system disk - ^e
+"
+	  >
+ifMIT	<			; mount the second RL1
+.if ne nrl
+        clr disk1		; as far as we know the disk is there
+	push #1			; MOUNT arg: disk no.
+	call mount		; prepare file system for use on system disk
+	pop r0			; val: error code
+	if ne,<
+	  mov pc,disk1		; disk not there
+	  push r0		; IOA arg: error code
+	  push ttych+0		; IOA arg: channel id
+	  call ioac
+	    .string ^"Can't mount RL1: - ^e
+"
+	  >
+.endc
+	>
+
+; Announce system up
+
+	mov pc,r1		; ptr to TTYCH
+	add #ttych-.,r1		; ...
+	mov #ntty,r0		; no. of TTY's
+ifSAO <
+        mov #1,r0		; only do the console terminal
+	>
+loop <	  push (r1)+		; WRITEC arg: channel id
+	  jsr r5,tmsg
+	    .string ^"in operation"
+	  sorl r0
+	  >
+	clr sysc		; no shutdown pending!
+
+; Now run down PLIST and create a process for each entry
+
+.if ne  0
+	mov pc,r3		; get ptr to plist
+	add #plist-.,r3		; ...
+loop <	  push (r3)+		; MAKEP arg: next process' initial pc
+	  exitl eq		; at end of list, exit loop
+	  add r3,(sp)		; make PC absolute (MAKEP arg)
+	  call makep		; create this process
+	  pop r1,r0		; vals: process id, error code
+	  if ne,<
+	    push r0		; IOA arg: error code
+	    push ttych+0	; IOA arg: channel id
+	    call ioac		; type nasty msg
+	      .string ^"Can't create process - ^e
+"
+	    tst (r3)+		; skip over TTY no.
+	    rptl
+	    >
+	  mov (r3)+,r2		; get TTY no.
+	  if pl,<
+	    asl r2		; times two for wording
+	    add pc,r2		; for PICness
+	    mov ttych-.(r2),r2	; get channel no. for TTY
+	    push r1,r2,r2	; SETUIO args: process id, channel, channel
+	    call setuio		; set user input and user output for process
+	    pop *		; val: error code
+	    if ne,<
+	      lose 0		; can't set user i/o values??
+	      >
+	    >
+	  push r1		; STARTP arg: process id
+	  call startp		; start the process running
+	  pop *			; val: error code
+	  if ne,<
+	    lose 0		; can't start process??
+	    >
+	  rptl			; go get next process in list
+	  >
+	pop *			; pop off 0 from MAKEP loop
+.endc
+
+; Wake up every half second and look for ^Z'd terminals.
+sysl:	push #30.		; TWFOR arg: 60ths
+	call twfor		; wait 1/2 second
+	mov #ntty,r2		; no. of terminals to check
+	tst sysc		; see if command for us
+	bne down		; right now only system shutdown used
+	mov pc,r1		; ptr to TTYCH
+	add #ttych-.,r1		; ...
+loop <	  tst pidtb-ttych(r1)	; already a process using TTY?
+	  bne 1$		; yes
+	  push (r1)		; RCHAR arg: channel id
+	  call rchar		; see if any input
+	  pop r0		; val: character
+	  cmp r0,#'		; ^Z?
+	  bne 1$		; no, try next
+	  push pc		; MAKEP arg: initial PC
+	  add #cp-.,(sp)	; ...
+	  call makep		; create command processor process
+	  pop pidtb-ttych(r1),r0	; vals: process id, error code
+	  if ne,<
+	    push r0		; IOA arg: error code
+	    push (r1)		; IOA arg: channel id
+	    call ioac		; explain we're losing
+	      .string ^"Can't create process - ^e
+"
+	    br 1$
+	    >
+	  push (r1),#3,#%tcniwt	; ORDER arg: channel id, order code, order arg
+	  call order		; turn off no input wait bit
+	  pop *			; val: order value
+	  push pidtb-ttych(r1)	; SETUIO arg: process id
+	  push (r1),(r1)	; SETUIO args: user input, user output
+	  call setuio		; set user input and output for process
+	  pop *			; val: error code
+	  if ne,<
+	    lose 0		; can't set user input and output??
+	    >
+	  push pidtb-ttych(r1)	; STARTP arg: process id
+	  call startp		; start the process we just created
+	  pop *			; val: error code
+	  if ne,<
+	    lose 0		; can't start process??
+	    >
+1$:	  tst prqtb-ttych(r1)	; see if there is another service we
+				; can perform for the process
+	  if lt,<		; negative means the process wants to die
+	    push pidtb-ttych(r1),(sp)	; get process ID twice
+	    call stopp		; stop the process
+	    pop *
+	    call killp		; and kill it
+	    pop *		; errors? should crash perhaps?
+	    clr prqtb-ttych(r1)
+	    clr pidtb-ttych(r1)
+	    push (r1),#2,#%tcniwt	; ORDER arg: channel id, order code,
+					; order arg 
+	    call order		; turn on no input wait bit
+	    pop *		; val: order value
+	    push (r1)		; WRITEC arg: channel id
+	    jsr r5,writec	; type an extra CRLF to confirm kill
+	     .string ^"
+"
+	    >
+	  tst (r1)+		; move to next TTY
+	  dec r2		; too far for SOB
+	  rptl ne
+	  >
+	br sysl
+
+
+; Announce system down
+down:
+ifSAO <				; just print out shutting down messages
+      >				; for SAO's machine
+ifMIT <				; for any other system, loop
+				; sending shutting down messages every
+				; minute
+	mov sysc,r5		; get number of minutes before shutdown
+	dec r5			; make it 1 less minute (so immediate
+				; shutdown is possible
+	clr r4			; haven't waited anytime yet
+loop <    tst sysc		; see if someone doesn't want the system down
+	  beq 1$		; if 0 then keep system up
+	  mov #ntty,r0		; number of TTY's
+ifSAO <
+          mov #1,r0		; only do console terminal
+       >
+	  mov pc,r1		; pointer to TTYCH
+	  add #ttych-.,r1	; ....
+  loop <    push r5		; IOAC arg: total number of minutes
+	    sub r4,(sp)		; make it time remaining
+	    push #tvn		; IOAC arg: our version number
+	    push (r1)+		; IOAC arg: channel id
+	    jsr r5,ioac		; print out shutdown message on terminal
+.if eq sysexp
+	    .string ^"TRANTOR ^d shutting down in ^d minutes.
+"
+.endc
+.else
+            .string ^"TRANTOR ^dX shutting down in ^d minutes.
+"
+.endc
+            sorl r0		; done all NTTY yet?
+	    >
+	  tst sysc		; see if system not wanted down
+	  beq 1$		; if 0 then keep system up
+	  cmp r4,r5		; reached time to shutdown yet
+	  exitl ge		; yes if R4 greater than R5
+	  inc r4		; inc r4 by 1 minute
+	  mov #60.,r0		; number of seconds to wait in the following
+  loop <    push #60.		; TWFOR arg: 60th's to wait (1 second)
+	    call twfor		; wait a minute
+	    tst sysc		; stayup??
+	    beq 1$		; if 0 then stayup
+	    sorl r0		; else repeat
+	    >
+	  rptl
+	  >
+      >
+	mov pc,r1		; ptr to TTYCH
+	add #ttych-.,r1		; ...
+	mov #ntty,r0		; no. of TTY's
+ifSAO <
+        mov #1,r0		; only tell the system console
+       >
+loop <	  mov pidtb-ttych(r1),r2	; get process id
+	  if ne,<
+	    push r2		; STOPP arg: process id
+	    call stopp		; stop the process
+	    pop *		; val: error code
+	    push r2		; KILLP arg: process id
+	    call killp		; kill the process
+	    pop *		; val: error code
+	    >
+	  push (r1)+		; WRITEC arg: channel id
+	  jsr r5,tmsg
+	    .string ^"not in operation"
+	  sorl r0
+	  >
+ifMIT <
+	push #3*60.		; TWFOR arg: 60ths to wait
+	call twfor		; wait for not in operation messages
+       >
+ifSAO <
+        mov savnxm,@#4
+	mov savnxm+2,@#6
+      >
+	.exit
+
+; jump here to tell the users that system is staying up.
+1$:    mov pc,r1		; ptr to TTYCH
+       add #ttych-.,r1		; ....
+       mov #ntty,r0		; get number of TTY's
+loop <   push (r1)+		; WRITEC arg: channel id
+         jsr r5,tmsg		; print message saying system staying up
+	 .string ^"staying up"
+	 sorl r0
+	 >
+       jmp sysl			; restart the system loop
+
+; TMSG is used by the system process to send a clear screen, "Trantor nnn",
+; some message, and finally the current time to a console.
+
+;	ARGS:				VALS:
+; SP ->	channel id			(none)
+
+tmsg:	push 2(sp),#%tdclr	; WCHAR args: channel id, character
+	call wchar		; clear screen
+	push r5			; IOA arg: asciz ptr (taken from relative
+	add (r5)+,(sp)		; ptr after call).
+	push #tvn		; IOA arg: trantor version no.
+	push 2+4(sp)		; IOAC arg: channel id
+	call ioac		; print system up message
+
+.lif eq sysexp
+	  .string ^"Trantor ^d ^a  "
+.lelse
+          .string ^"Trantor ^dX ^a  "
+
+	tst timsts		; time known?
+	if ne,<			; yes
+	  push 2(sp)			; PTIME arg: channel id
+	  push #%pttime+%ptdate+%ptslsh	; PTIME arg: control bits
+	  call time		; PTIME args: time hi, time lo
+	  call ptime		; print current time
+	  >
+	push 2(sp)		; WRITEC arg: channel id
+	call writec		; finish time with CRLF
+	  .string ^"
+"
+	pop (sp)		; remove arg from stack
+	rts r5
+
+
+; SYSMSG is used to call IOAC with output going to the console terminal.
+sysmsg: push #8			; number of ^G's to send
+  loop <  push ttych+0,#%tdbel	; WCHAR args: channel id, character
+	  call wchar		; send a bell
+	  dec (sp)		; done??
+	  rptl ne		; nope...
+	  >
+	pop *			; remove count
+	push (sp)		; make room for channel id arg to IOAC
+	mov ttych+0,2(sp)	; IOAC arg: channel id
+	jmp ioac		; print msg on system console
+
+
+; The following is a list of processes to start up at system
+; initialization.  Each entry is an initial PC and TTY #.
+
+plist:	.word 0			; terminator
+
+.sbttl	Error codes and messages
+
+.macro	error ec,emsg
+nerrc==nerrc+1
+ec==nerrc
+	.string ^"emsg"
+.endm
+nerrc==0
+
+errtab:	error %ebdda,^"Data not valid"
+	error %ebdio,^"Illegal I/O operation"
+	error %ebdoc,^"Bad ORDER code"
+	error %ebdsc,^"Bad software TTY code"
+	error %eemq,^"Empty queue"
+	error %eenfi,^"End of file"
+	error %efldv,^"Device full"
+	error %eflq,^"Full queue"
+	error %ehgdv,^"Device hung"
+	error %enach,^"No channels available"
+	error %enacr,^"No core available"
+	error %enadv,^"Device not available"
+	error %entty,^"Terminal not available"
+	error %enafi,^"File locked"
+	error %ensch,^"Non-existant channel"
+	error %ensdi,^"No such directory"
+	error %ensdv,^"No such device"
+	error %ensfl,^"File not found"
+	error %ensjb,^"Non-existant job"
+	error %eovsk,^"Stack overflow"
+	error %estjb,^"Job must be stopped"
+	error %eunsk,^"Stack underflow"
+	error %eivfl,^"Invalid filename"
+	error %enone,^"Unknown error code"
+
+; ERRMSG returns a ptr to an asciz error message given the error code.
+
+;	ARGS:				VALS:
+
+; SP ->	error code		 SP ->	ptr to asciz message
+
+errmsg:	push r1			; save reg
+	mov 4(sp),r1		; get error code
+	dec r1			; make zero based
+	cmp r1,#nerrc		; valid error code?
+	if his,<
+           push r1		; IOA arg: unknown error code
+	   call sysmsg		; print error code on the System TTY
+	   .string ^"Unknown Error Code = ^o
+"
+           mov #%enone-1,r1	; make error code unknown error code
+	  >
+	asl r1			; times two for wording
+	add pc,r1		; PICally add ptr to table to index
+	add #errtab-.,r1	; ...
+	add (r1),r1		; add table entry to entry ptr to get
+				; absolute ptr to error message
+	mov r1,4(sp)		; return ptr to error message
+	pop r1			; restore reg
+	return
+
+.sbttl	External modules
+
+; Insert other modules for assembly (someday may assemble separately).
+
+	.insrt pdp11;io
+
+	.insrt pdp11;ioa
+
+	.insrt pdp11;aline
+
+.lif ne  asmcdc
+	.insrt pdp11;sline
+
+	.insrt pdp11;tty
+
+.if ne  asmtek
+	.insrt pdp11;tek
+
+;;;	.insrt pdp11;memplt
+
+;;;	.insrt pdp11;sol
+.endc
+
+.lif ne  nlp
+	.insrt pdp11;lpt
+
+	.insrt pdp11;disk
+
+	.insrt pdp11;cp
+
+	.insrt pdp11;spinwr
+
+.lif ne  asmcns
+	.insrt pdp11;consol
+
+.lif ne  asmtrl
+	.insrt pdp11;trollr
+
+.lif ne  asmcdc
+	.insrt pdp11;nu200
+
+disk1:	.word 1			; zero if disk 1 is there
+nobnrd: .blkw 1			; number of blocks not read from the disk
+notbmp: .blkw 1			; no. of times bit-map was written out
+nproc:	.blkw 1			; active process count
+sysc:	.blkw 1			; system communication word
+tekuse:	.word 0			; non-zero if plotter in use
+ttych:	.blkw ntty		; channel ids of TTYs
+pidtb:	.blkw ntty		; process ids of console controlled trees
+prqtb:	.blkw ntty		; process request table
+
+litrl:	constants		; leave room for .litrl and .string
+				; constants
+
+subrl:	linkb			; table of links to be snapped
+				; (created by CALL macro)
+
+last=.
+.end go

@@ -1,0 +1,1331 @@
+; -*-PALX-*-
+
+.sbttl	Terminal DIM
+
+; Define the TTY DIM entry points
+tty:	defdim tatt,tdet,torder,ti,to,tno,tno,tipeek
+
+
+; TTY channel block.
+dsect <
+	 .blkw 1		; ptr to tty structure of terminal
+tcosw::	 .blkw 1		; address of handler for next character
+tcbits:: .blkw 1		; control bits from attach call
+.if ne  0
+tcwtop:: .blkw 1		; line no. of first line in window
+tcwlen:: .blkw 1		; length of window
+tcwvp::	 .blkw 1		; window vertical position
+tcwhp::	 .blkw 1		; window horizontal position
+.endc
+	 >,ltchb
+
+; Cbits
+%tcio==1			; image ouput
+%tcniwt==2			; no waiting on input
+%tcnctn==4			; no line continuation
+
+
+; TTY structure.
+dsect <
+tctyp::	 .blkw 1		; terminal type code
+tlinen:: .blkw 1		; line no. to do i/o to for TTY
+thmax::	 .blkw 1		; terminal line length
+tvmax::	 .blkw 1		; terminal page length
+topt::	 .blkw 1		; terminal option bits
+thpos::	 .blkw 1		; horizontal cursor position
+tvpos::	 .blkw 1		; vertical cursor position
+tthpos:: .blkw 1		; terminal's actual hpos
+ttvpos:: .blkw 1		; terminal's actual vpos
+ispeed:: .blkw 1		; input speed in cps
+ospeed:: .blkw 1		; output speed in cps
+tbreak:: .blkw 1		; set if a break was typed by the user
+tmoren:: .blkw 1		; screen line no. on which input was
+				; last typed by the user
+	 >,lttab
+
+ifSAO <
+  %tntty==0			; random printing terminal
+  %tnvt==4			; VT52
+  %tnla8==10			; LA180 DECprinter I
+  %tnvt1==14			; VT100/VT132 terminal
+  %tnaaa==20			; Ann Arbor Ambassador
+
+.macro	tdisp name
+	add (r3),pc
+.irp x,<tty,vt,la8,vt1,aaa>
+	jmp x''name
+.endm
+.endm
+
+      >
+
+ifMIT <
+  %tntty==0			; random printing terminal
+  %tnsb==4			; StupidBee
+  %tnvt==10			; VT52
+  %tnhp==14			; HP2645
+  %tnla1==20			; LA120 DecWriter III
+  %tnvt1==24			; VT100/VT132 terminal
+  %tnaaa==30			; Ann Arbor Ambassador
+
+.macro	tdisp name
+	add (r3),pc
+.irp x,<tty,sb,vt,hp,la1,vt1,aaa>
+	jmp x''name
+.endm
+.endm
+
+     >
+
+
+%tocro==1			; terminal automatically CRLFs on line overflow
+%toers==2			; terminal can selectively erase its screen
+%toovr==4			; terminal can overwrite characters
+%todis==10			; display terminal, i.e. can move cursor
+%toabs==20			; use direct cursor addressing
+%tobs==40			; terminal can backspace
+%toesc==100			; last input character was ESC
+%tomor==200			; do more processing
+%tnech==400			; send output to terminal if not set
+%tnxon==1000			; terminal wants XON/XOFF flow control
+%tnetx==2000			; terminal wants ETX/ACK flow control (not yet)
+%tansi==4000			; terminal uses ANSI escape sequences
+
+
+; Define the %TD codes
+%tdnop==200			; No operation
+%tdhom==201			; Move to upper left ("home")
+%tdhmv==202			; Move to horizontal position
+%tdvmv==203			; Move to vertical position
+%tdmov==204			; Move to vertical, horizontal position
+%tdclr==205			; Clear screen
+%tders==206			; Clear character
+%tdeol==207			; Clear to End of Line
+%tdeos==210			; Clear to End of Screen
+%tdso0==211			; Standout mode 0 (normal)
+%tdso1==212			; Standout mode 1 (blinking)
+%tdso2==213			; Standout mode 2 (reverse video)
+%tdso3==214			; Standout mode 3 (blinking reverse video)
+%tdbel==215			; Ring bell
+%tdff==216			; send a formfeed
+
+.macro	term line,tctyp,pl,ll,opt,is,os
+	.word %tn'tctyp,line,ll-1,pl-1,opt,0,0,0,0,is,os,0,0
+ntty==ntty+1
+.endm
+
+%%temp===%todis+%toers+%tobs
+
+ntty==0
+
+ifMIT <
+
+;;; line 2 is the TEK4664 plotter -- DL11-E at 775620
+
+ttab:	term 0.,la1,0,132.,%tobs,10.,10.
+				; T0 LA34 Console -- DL11-W
+	term 1.,tty,0,132.,%toovr+%tobs,120.,120.
+				; T1 Vadic 300 -- DL11-E at 775610
+	term 3.,tty,0,132.,%toovr+%tobs,30.,30.
+				; T2 Not used at 775630
+	term 4.,tty,0,80.,%toovr+%tobs,480.,480.
+				; T3 Not used at 775640
+	term 5.,tty,0,80.,%tnxon+%toovr+%tobs,960.,960.
+				; T4  TTY -- DZ11 Line 0
+	term 6.,tty,0,80.,%tnxon+%toovr+%tobs,960.,960.
+				; T5  TTY -- DZ11 Line 1
+	term 7.,tty,0,80.,%tnxon+%toovr+%tobs,960.,960.
+				; T6  TTY -- DZ11 Line 2
+	term 8.,tty,0,80.,%tnxon+%toovr+%tobs,960.,960.
+				; T7  TTY -- DZ11 Line 3
+	term 9.,tty,0,80.,%toovr+%tobs,120.,120.
+				; T8  Vadic 1200 -- DZ11 Line 5
+	term 10.,tty,0,80.,%tnxon+%toovr+%tobs,120.,120.
+				; T9  Spinwriter -- DZ11 Line 4
+	term 11.,tty,0,80.,%toovr,240.,240.
+				; T10  HP3000 -- DZ11 Line 6
+	term 12.,tty,0,80.,%%temp,960.,960.
+				; T11  MC -- DZ11 Line 7
+     >
+
+ifSAO <
+; keep the listings in this order, depends on file # being 0.
+
+ttab:	term 1,la8,0.,120.,%tnxon+%toovr+%tobs,120.,120.
+				; T0 LA180 -- DLV11-J Line 0
+	term 0,vt,24.,80.,%%temp,960.,960.
+				; T1 VT100 console -- DLV11-J Line 3
+	term 2,tty,0.,132.,%tnxon+%toovr+%tobs,120.,120.
+				; T2 SPINWRITER -- DLV11-J Line 1
+	term 3,tty,0.,132.,%toovr+%tobs,120.,120.
+				; T3 Vadic 1200 -- DLV11-J Line 2
+	term 4,tty,0.,132.,%toovr+%tobs,120.,120.
+				; T4 Not used -- DLV11 at 775610
+	term 5,tty,0.,132.,%toovr+%tobs,30.,30.
+				; T5 Vadic 300 -- DLV11 at 775620
+     >
+
+
+; TTINIT is called at system startup to initialize the TTY module.
+ttinit:	push #ntty		; number of ttys to do
+	mov pc,r3		; ptr to TTAB
+	add #ttab-.,r3		; ...
+loop <	  call ttint		; setup this line
+	  add #lttab,r3		; move ptr to next TTAB entry
+	  dec (sp)
+	  rptl ne		; ...
+	  >
+	tst (sp)+		; remove zero from stack
+	return
+
+; TTINT sets up an asynchrounous line.
+; R3 -> TTAB entry for the line.
+ttint:	jsr r5,1$		; do TDISP as a subroutine call
+	bit #%tnxon,topt(r3)	; does this line want flow control on
+	if ne,<
+	  push tlinen(r3),#%alxon	; ALSMOD args: line no., mode
+	  call alsmod		; set XON/XOFF mode for this line
+	  >
+	return
+1$:	tdisp ini		; initialize terminal
+
+
+; TTY DIM attach entry point
+tatt:	push #ltchb/2,#2*60.	; ALOCW args: size, timeout
+	call alocw		; allocate TTY channel block
+	pop r4,r0		; vals: ptr, error code
+	bne 1$
+	mov r2,tcbits(r4)	; save control bits in channel block
+	mul #lttab,r1		; set DIM data word to tty structure ptr
+	add pc,r1		; ...
+	add #ttab-.,r1		; ...
+	mov r1,(r4)		; save tty structure ptr in channel block
+	push pc			; ptr to TO1
+	add #to1-.,(sp)		; ...
+	pop tcosw(r4)		; set output switch to TO1
+	clr r0			; return zero error code (success)
+1$:	return
+
+
+; TTY DIM detach entry point
+tdet:	push r4			; FREE arg: ptr
+	call free		; free channel block
+	return
+
+
+; TTY DIM order entry point
+torder:	mov r3,r1		; copy order code
+	mov (r4),r3		; ptr to TTAB entry
+	cmp r1,#20000		; set command?
+	bhis tords
+	cmp r1,#10000		; read command?
+	bhis tordr
+	cmp r1,#3		; check for illegal order code
+	bhi to0
+	asl r1			; times two for wording
+	add r1,pc
+to0:	lose %ebdoc		; 0, illegal
+	br 1$			; 1, Status request
+	br 2$			; 2, BIS into cbits
+	br 3$			; 3, BIC into cbits
+1$:	clr r0			; STATUS request: return zero
+	return
+2$:	bis r2,tcbits(r4)	; BIS into cbits
+	return
+3$:	bic r2,tcbits(r4)	; BIC into cbits
+	return
+
+tordr:	sub #10000,r1
+	add r3,r1
+	mov (r1),r0
+	return
+
+tords:	sub #20000,r1
+	add r3,r1
+	mov r2,(r1)
+	return
+
+
+; TTY DIM entry point for unimplemented operations (DELETE, RENAME).
+tno:	lose %ebdio
+	return
+
+.sbttl	Terminal i/o
+
+; TI is the TTY DIM input entry point.  It is called by the I/O system.
+
+;	ARGS:				VALS:
+; R3:	ptr to channel structure  R0:	character
+
+ti:	mov (r4),r3		; get tty structure ptr
+	call tupd		; move cursor to where its supposed to be
+	push tlinen(r3),#0	; ALREAD arg: line no., timeout
+	bit #%tcniwt,tcbits(r4)	; no wait bit set?
+	if eq,<			; no
+	  dec (sp)		; change timeout to -1 (i.e. no timeout)
+	  >
+	call alread		; read character from line
+	pop r0,*		; vals: character, error code
+	bne 1$
+	bic #177600,r0		; clear random bits in character
+	mov tvpos(r3),tmoren(r3)	; save vertical position for more processing
+	tdisp in		; dispatch to terminal specific routine
+1$:	return
+
+tipeek:
+.if ne asmpek
+	mov (r4),r3		; get tty structure ptr
+	push tlinen(r3),#0	; ALPEEK arg: line no., timeout
+	bit #%tcniwt,tcbits(r4)	; no wait bit set?
+	if eq,<			; no
+	  dec (sp)		; change timeout to -1 (i.e. no timeout)
+	  >
+	call alpeek		; read character from line
+	pop r0,*		; vals: character, error code
+	bne 1$
+	bic #177600,r0		; clear random bits in character
+	tdisp in		; dispatch to terminal specific routine
+1$:	return
+.endc
+.else
+        jmp tno
+.endc
+
+; TO is the TTY DIM's output entry point.  It is called by the I/O system.
+
+;	ARGS:				VALS:
+; R4:	ptr to channel structure	(none)
+; R0:	character
+
+to:	mov (r4),r3		; get ptr to tty structure
+	bit #%tcio,tcbits(r4)	; image output?
+	if ne,<
+	  jmp toi		; output character in image output
+	  >
+	jmp @tcosw(r4)		; dispatch next character to output co-routine
+
+to1:	bit #%tnech,topt(r3)	; sending turned off??
+	if ne,<			; yes
+	  return		; don't send anything
+	  >
+	cmpb r0,#40		; Displayable character (ASCII 40-176) ?
+	if gt,<
+	  jmp tochr		; type displayable character and return
+	  >
+	beq tosp
+	if hi,<			; %TD character (200-377) ?
+	  asl r0		; times two for index into word table
+	  add pc,r0		; for PICness
+	  add tdtab-400-.(r0),pc	; switch to routine for %TD character
+to2:
+	  >
+; Character in R0 is some control character.  Check for various formating
+; control chars.
+
+	cmp r0,#11		; TAB?
+	beq totab
+	cmp r0,#12		; LF?
+	beq tolf
+	cmp r0,#15		; CR?
+	if eq,<
+	  clr thpos(r3)		; update cursor position
+	  return
+	  >
+	cmp r0,#14		; FF?
+	if eq,<
+	  jmp tdff
+	  >
+; All the rest are control characters to be typed as ^x
+to3:	push r0			; save character
+	mov #'^,r0		; put ^ in R0
+	call tochr		; type the ^
+	pop r0			; restore character
+	add #100,r0		; TOCHR arg: character
+	jmp tochr		; type character and return
+
+; TOTAB handles tabs.
+totab:	call tosp		; move forward
+	bit #7,thpos(r3)	; see if at a tab stop yet
+	bne totab		; keep going if not
+	return
+
+; TOSP handles spaces.
+tosp:	call toc1		; hack line continuation
+	call toc3		; move forward
+	return
+
+
+; TOCHR types a displayable character.  Line continuation is handled.
+tochr:	call toc1		; hack line continuation
+	call toc2		; send character
+	jsr r5,1$		; do tdisp as a subroutine call
+	call toc3		; move forward
+	return
+1$:	tdisp out		; do any post character sending processing
+				; which is dependent upon the terminal
+
+; This routine hacks possible line continuation.
+toc1:	cmp thpos(r3),thmax(r3)	; last position in line?
+	bne 1$			; no, skip hairy last column hackery
+	bit #%tcnctn,tcbits(r4)	; no overflow indication?
+	bne 1$
+	call tupd		; move the cursor where its supposed to be
+	push r0			; save character
+	mov #'!,r0		; TOCHR1 arg: character
+	call toc2		; type !
+	pop r0			; restore character
+	clr thpos(r3)		; CR
+	call tolf		; LF
+1$:	return
+
+
+; This routine outputs a printing character and accounts for the movement it
+; produces.
+toc2:	call tupd		; move the cursor where it is suppsed to be
+	call toi		; send the character
+	cmp tthpos(r3),thmax(r3)	; last column?
+	if ne,<
+	  inc tthpos(r3)	; no, simply advance by 1
+	  return
+	  >
+	bit #%tocro,topt(r3)	; does terminal auto-CRLF in last column?
+	if ne,<			; yes
+	  clr tthpos(r3)	; CR
+	  inc ttvpos(r3)	; LF
+	  >
+	return
+
+
+; This routine advances the horizontal position by 1.
+toc3:	cmp thpos(r3),thmax(r3)	; last column?
+	if eq,<			; yes
+	  clr thpos(r3)		; CR
+	  br tolf		; LF
+	  >
+	inc thpos(r3)		; advance by 1 column
+	return
+
+
+; TOLF handles linefeeds.
+tolf:	tst tvmax(r3)		; printing terminal?
+	bmi ttylf		; yes, different hackery
+	cmp tvpos(r3),tvmax(r3)	; on bottom line?
+	if lo,<			; no
+	  inc tvpos(r3)		; update cursor position
+	  >
+	else <
+	  clr tvpos(r3)		; wrap to top of screen
+	  >
+ifMIT <
+	bit #%tomor,topt(r3)	; are we hacking -more- processing
+	bne tomore		; yes if bit set
+      >
+	jmp tdeol		; erase the line moved to
+
+ifMIT <
+tomore: push r0			; save register
+	cmp tvpos(r3),tvmax(r3)	; are we on the last line now
+	if eq,<
+	  mov tmoren(r3),r0	; get last line on which there was input
+	  add #3,r0		; increment by 3
+	  cmp r0,tvmax(r3)	; were we near the end of the screen
+	  if ge,<		; yes
+	    mov #0,tmoren(r3)	; reset screen input line number
+	    br 1$		; don't do more processing this time
+	    >
+	  call tupd		; update cursor
+	  jsr r5,toisc		; print **more** message
+	  .string ^"*-MORE-*"
+	  call tdeol		; erase to end of line
+	  push tlinen(r3),#-1	; ALREAD args: line no.,time-out
+.lif ne asmpek
+	  call alpeek		; peek at response
+.lelse
+          call alread		; get a character
+	  pop r0,*		; VALS: character,error code
+	  cmp r0,#40		; was character a space?
+	  if eq,<		; yes
+.if ne asmpek
+	    push tlinen(r3),#-1	; ALREAD args: line no.,time-out
+	    call alread		; snarf up the space
+	    pop r0,*		; VALS: character,error code
+.endc
+	    call tdhom		; move to home position
+	    br 1$		; we're all through
+	    >
+	  else <
+	    jsr r5,toisc	; print flushed message
+	    .string ^" Flushed"
+	    call tdhom		; position cursor to home position
+	    bis #%tnech,topt(r3)	; turn off echoing
+	    >
+	  >
+1$:     pop r0			; restore register
+	jmp tdeol		; clear to end of line
+     >
+
+ttylf:	call tupd		; move to horizontal position we're supposed
+				; to be at
+	push r0			; save register
+	mov #12,r0		; TOI arg: character
+	call toi		; send LF
+	pop r0			; restore register
+.if df %tntrm			; no terminets around anymore, but keep the
+				; code just in case
+	cmp (r3),#%tntrm	; Terminet?  (really LA180 -- see below)
+	bne 1$
+	mov ospeed(r3),r1	; divide output speed by 4 to get the no.
+	add #3,r1		;  of characters to send for 1/4sec LF
+	ash #-2,r1		;  ...
+
+;	mov #35,r1		; gross LA180 timing
+;	sub thpos(r3),r1
+;	blt 1$
+	push r1,#0		; TSEND args: no. of characters, character
+	call tsendn		; send enough pads so previous LF wins
+.endc
+1$:	return
+
+
+; TONXT CHANGES output switch so the next output character is passed as an
+; ARGUMENT TO the caller.
+tonxt:	pop tcosw(r4)		
+	return
+
+
+
+; TOTD is a table of routines to handle the various %TD codes.
+tdtab:	.word tdnop-to2		; %TDNOP  no-op
+	.word tdhom-to2		; %TDHOM  home
+	.word tdhmv-to2		; %TDHMV  horizontal move (next byte is pos)
+	.word tdvmv-to2		; %TDVMV  vertical move (next byte is pos)
+	.word tdmov-to2		; %TDMOV  move (next bytes are horz and vert)
+	.word tdclr-to2		; %TDCLR  clear screen
+	.word tders-to2		; %TDERS  erase character above cursor
+	.word tdeol-to2		; %TDEOL  clear rest of line
+	.word tdeos-to2		; %TDEOS  clear rest of screen
+	.word tdso0-to2		; %TDSO0  normal display mode (standout mode 0)
+	.word tdso1-to2		; %TDSO1  standout mode 1 (blinking)
+	.word tdso2-to2		; %TDSO2  standout mode 2 (reverse video)
+	.word tdso3-to2		; %TDSO3  standout mode 3 (blinking rev video)
+	.word tdbel-to2		; %TDBEL  ding bell
+	.word tdff-to2		; %TDFF	  send a form feed
+
+
+.macro	twrite t
+	jsr r5,toisc
+	  .string ^~t~
+.endm
+
+
+; %TDNOP - no-op
+tdnop:	return
+
+
+; %TDHOM - move to top of screen.
+tdhom:	clr thpos(r3)		; home position has is in column zero
+	tst tvmax(r3)		; printing terminal?
+	bmi ttylf		; yes, LF
+	clr tvpos(r3)		; update cursor position
+	return
+
+
+; %TDVMV - vertical move
+tdvmv:	jsr pc,tonxt
+	dec r0
+.lif ne  0
+	add tcwtop(r4),r0
+	mov r0,tvpos(r3)
+	br tdmv1
+
+; %TDMOV - move
+tdmov:	jsr pc,tonxt
+	dec r0
+.lif ne  0
+	add tcwtop(r4),r0
+	mov r0,tvpos(r3)
+
+; %TDHMV - horizontal move
+tdhmv:	jsr pc,tonxt
+	dec r0
+	mov r0,thpos(r3)
+tdmv1:	mov #to1,tcosw(r4)	; reset output switch
+	call tupd		; update cursor position
+	return
+
+
+; TUPD forces the cursor to be where its supposed to be.
+tupd:	cmp thpos(r3),tthpos(r3)
+	bne 1$
+	cmp tvpos(r3),ttvpos(r3)
+	bne 1$
+	return
+1$:	tdisp mov
+
+
+; %TDERS - erase the character before the cursor.
+tders:  tst thpos(r3)		; BS in column zero?
+	if ne,<			; no
+	  dec thpos(r3)		; decrement horizontal position
+	  >
+	call tupd		; make sure cursor is where it should be
+	tdisp ers
+
+
+; %TDEOL - erase the rest of the line.
+tdeol:	call tupd		; make sure cursor is where it should be
+	tdisp eol
+
+
+; %TDCLR - Clear Screen
+tdclr:	call tdhom		; move to upper left
+; fall through to TDEOS
+
+
+; %TDEOS - erase the rest of the screen.
+tdeos:	call tupd		; make sure cursor is where it should be
+	tdisp eos
+
+
+; %TDSO0 - normal display mode
+tdso0:	call tupd		; make sure cursor is where it should be
+	tdisp so0
+
+
+; %TDSO1 - standout mode 1 (blinking)
+tdso1:	call tupd		; make sure cursor is where it should be
+	tdisp so1
+
+
+; %TDSO2 - standout mode 2 (reverse video)
+tdso2:	call tupd		; make sure cursor is where it should be
+	tdisp so2
+
+
+; %TDSO3 - standout mode 3 (blinking rev video)
+tdso3:	call tupd		; make sure cursor is where it should be
+	tdisp so3
+
+
+; %TDBEL - ding bell
+tdbel:	call tupd		; make sure cursor is where it should be
+	tdisp bel
+
+; %TDFF - send a form feed
+tdff:	tst tvmax(r3)
+	if mi,<			; printing terminal
+	  tdisp ff
+	  >
+	jmp to3
+
+.sbttl	Printing terminals
+
+; No operation
+ttynop:	return
+
+ttyin===ttynop
+ttyout===ttynop
+ttyeol===ttynop
+ttyeos===ttynop
+ttyso0===ttynop
+ttyso1===ttynop
+ttyso2===ttynop
+ttyso3===ttynop
+ttyff===ttynop
+
+; Initialize
+ttyini:	mov #15,r0		; TOI arg: character
+	call toi		; output CR
+	clr tthpos(r3)		; clear horizontal position
+	return
+
+; Erase character
+ttyers:	twrite ^" "
+	return
+
+; Feep bell
+ttybel:	twrite ^""
+	return
+
+
+; Horizontal positioning
+ttymov:	mov tthpos(r3),r1	; get actual position
+	mov thpos(r3),tthpos(r3)	; update it
+	sub thpos(r3),r1	; find distance from current position
+	if mi,<
+	  neg r1		; make position
+	  push r1,#40		; TSENDN args: no., character
+	  call tsendn		; send n spaces
+	  return
+	  >
+	bit #%tobs,topt(r3)	; can TTY backspace?
+	if ne,<
+	  cmp r1,thpos(r3)	; which is better, CR spaces or backspaces?
+	  if lo,<		; CR spaces is better
+	    push r1,#10		; TSENDN args: no., character
+	    call tsendn		; send n backspaces
+	    return
+	    >
+	  >
+	mov #15,r0		; TOI arg: character
+	call toi		; send CR
+	push thpos(r3),#40	; TSENDN args: no., character
+	call tsendn		; send n spaces
+	return
+
+.sbttl	VT52
+
+; always assemble
+vtin===ttyin
+vtout===ttynop
+vters===ttyers
+vtso0===ttynop
+vtso1===ttynop
+vtso2===ttynop
+vtso3===ttynop
+vtbel===ttybel
+
+; Initialize
+vtini:	twrite ^"HJ\>G"	; home, exit hold-screen mode, exit alternate-
+				; keypad mode, exit graphics mode
+	clr tthpos(r3)
+	clr ttvpos(r3)
+	clr thpos(r3)
+	clr tvpos(r3)
+	return
+
+; Erase to end of line
+vteol:	twrite ^"K"
+	return
+
+; Erase to end of screen
+vteos:	twrite ^"J"
+	return
+
+vtff===vteos
+
+; Cursor movement
+vtmov:	push r0,r1,r2		; save regs
+	push #4			; TERMOV arg: cost of direct cursor addressing
+	call termov		; see if relative move is best
+	  br 1$			; return1, relative move done
+	twrite ^"Y"		; send cursor position code for Vt52
+	mov tvpos(r3),r0	; get vertical position
+	add #40,r0		; put position into printable range
+	call toi		; send vertical position
+	mov thpos(r3),r0	; get horizontal position
+	add #40,r0		; put position into printable range
+	call toi		; send horizontal position
+	mov tvpos(r3),ttvpos(r3)
+	mov thpos(r3),tthpos(r3)
+1$:	pop r2,r1,r0		; restore regs
+	return
+
+
+; TERMOV is the escape sequence terminals' relative movement subroutine.
+; If direct cursor addressing is best then TERMOV outputs nothing and
+; takes return2.  If relative cursor movement using CR, HOME, UP, DOWN,
+; RIGHT, and LEFT commands is best then TERMOV does the cursor movement
+; and takes return1.  If %TOABS is clear then relative movement is always
+; done.
+
+;	ARGS:				VALS:
+; SP ->	cost of direct cursor address	(none)
+
+; RETURN1: Relative movement has been done
+; RETURN2: Direct cursor addressing is best
+
+termov:	cmp thpos(r3),#80.	; Horizontal position beyond abs
+				; addressing??
+        bge 2$			; yes, do relative movement
+	mov #2,-(sp)		; scratch word, init to "home and rel move"
+	mov tvpos(r3),r2	; get desired vertical position
+	mov thpos(r3),r1	; get desired horizontal position
+	mov r1,r0		; cost of home and move is V + 2H + 2
+	inc r0			; ...
+	asl r0			; ...
+	add r2,r0		; ...
+	bit #%toabs,topt(r3)	; supposed to use direct cursor addressing?
+	if ne,<			; yes
+	  cmp 4(sp),r0		; direct cursor addressing better than
+				; home and relative move?
+	  if lo,<		; yes
+	    mov 4(sp),r0	; set minimum cost so far to that of direct
+	    mov #4,(sp)		; address, change to "direct cursor address"
+	    >
+	  >
+	sub ttvpos(r3),r2	; calculate vertical difference
+
+	if mi,<			; negative, i.e. move up
+	  neg r2		; make positive
+	  asl r2		; times two to get cost
+	  >
+	sub tthpos(r3),r1	; calculate horizontal difference
+	neg r1			; make backwards difference
+	if mi,<			; negative, i.e. move forward
+	  neg r1		; make positive
+	  asl r1		; times two to get cost
+	  >
+	add r1,r2		; add horizontal and vertical costs
+	cmp r2,r0		; relative move better than best so far?
+	if lo,<			; yes
+	  mov r2,r0		; set minimum cost so far to that of rel move
+	  clr (sp)		; change to "relative move"
+	  >
+	sub r1,r2		; get back vertical cost
+	add thpos(r3),r2	; add 2H + 1 which is cost of CR and
+	add thpos(r3),r2	; relative movement
+	inc r2			; ...
+	cmp r2,r0		; CR and relative move better than best so far?
+	if lo,<			; yes
+	  mov #15,r0		; TOI arg: character
+	  call toi		; output CR
+	  clr tthpos(r3)	; keep track of movement
+	  clr (sp)		; now do "relative movement"
+	  >
+	add (sp)+,pc		; dispatch on best method found
+	br 2$			; "relative move"
+	br 1$			; "home and relative move"
+				; "direct cursor address"
+	pop (sp)		; remove arg from stack
+	retrn2			; return2 to indicate direct cursor move
+				; is best
+1$:	  twrite ^"H"		; move to upper left corner of screen ("home")
+	clr ttvpos(r3)		; account for home operation
+	clr tthpos(r3)		; ...
+2$:	cmp ttvpos(r3),tvpos(r3)	; reached desired vertical position?
+	beq 3$				; yes
+	if lo,<			; above desired vertical position
+	  mov #12,r0		; TOI arg: character
+	  call toi		; output LF to move down one line
+	  inc ttvpos(r3)	; keep track of movement
+	  br 2$
+	  >
+	twrite ^"A"		; output ESC A to move up one line
+	dec ttvpos(r3)		; keep track of movement
+	br 2$
+3$:	cmp tthpos(r3),thpos(r3)	; reached desired horizontal position?
+	beq 4$				; yes
+	if hi,<			; right of desired horizontal position
+	  mov #10,r0		; TOI arg: character
+	  call toi		; output BS to move left one column
+	  dec tthpos(r3)	; keep track of movement
+	  br 3$
+	  >
+				; left of desired horizontal position
+        twrite ^"C"		; output ESC C to move right one column
+	inc tthpos(r3)		; keep track of movement
+	br 3$
+4$:	pop (sp)		; remove arg from stack
+	retrn1			; return1 for relative move (already done)
+
+
+.sbttl	Ambassador
+
+; always assemble
+aaain===ttyin
+aaaout===ttynop
+aaaers===ttyers
+aaaso0===ttynop
+aaaso1===ttynop
+aaaso2===ttynop
+aaaso3===ttynop
+aaabel===ttybel
+
+; Initialize
+aaaini:	twrite ^"[H[J"	; home, clear screen
+	push #100		; Fill count for clear screen
+	call aaafll		; send fill characters
+	clr tthpos(r3)
+	clr ttvpos(r3)
+	clr thpos(r3)
+	clr tvpos(r3)
+	return
+
+; Erase to end of line
+aaaeol:	twrite ^"[K"
+	return
+
+; Erase to end of screen
+aaaeos:	twrite ^"[J"
+	return
+
+aaaff===aaaeos
+
+aaafll:	cmp ospeed(r3),#120.	; 1200 baud or less???
+	if le,<			; no, don't pad
+	  pop (sp)		; remove arg
+	  return		; and return
+	  >
+	push (sp)
+	clr 2(sp)		; TSENDN arg: character (# of times on stack)
+	jmp tsendn		; send fill characters
+
+;;; Cursor movement
+aaamov:	push r0,r1,r2		; save regs
+	push #4			; TERMOV arg: cost of direct cursor addressing
+	call ansmov		; see if relative move is best
+	  br 1$			; return1, relative move done
+	twrite ^"Y"		; send cursor position code for AAA
+	mov tvpos(r3),r0	; get vertical position
+	add #40,r0		; put position into printable range
+	call toi		; send vertical position
+	mov thpos(r3),r0	; get horizontal position
+	add #40,r0		; put position into printable range
+	call toi		; send horizontal position
+	mov tvpos(r3),ttvpos(r3)
+	mov thpos(r3),tthpos(r3)
+1$:	pop r2,r1,r0		; restore regs
+	return
+
+
+; ANSMOV is the escape sequence terminals' relative movement subroutine.
+; If direct cursor addressing is best then ANSMOV outputs nothing and
+; takes return2.  If relative cursor movement using CR, HOME, UP, DOWN,
+; RIGHT, and LEFT commands is best then ANSMOV does the cursor movement
+; and takes return1.  If %TOABS is clear then relative movement is always
+; done.
+
+;	ARGS:				VALS:
+; SP ->	cost of direct cursor address	(none)
+
+; RETURN1: Relative movement has been done
+; RETURN2: Direct cursor addressing is best
+
+ansmov:	cmp thpos(r3),#80.	; Horizontal position beyond abs
+				; addressing??
+        bge 2$			; yes, do relative movement
+	mov #2,-(sp)		; scratch word, init to "home and rel move"
+	mov tvpos(r3),r2	; get desired vertical position
+	mov thpos(r3),r1	; get desired horizontal position
+	mov r1,r0		; cost of home and move is V + 2H + 2
+	inc r0			; ...
+	asl r0			; ...
+	add r2,r0		; ...
+	bit #%toabs,topt(r3)	; supposed to use direct cursor addressing?
+	if ne,<			; yes
+	  cmp 4(sp),r0		; direct cursor addressing better than
+				; home and relative move?
+	  if lo,<		; yes
+	    mov 4(sp),r0	; set minimum cost so far to that of direct
+	    mov #4,(sp)		; address, change to "direct cursor address"
+	    >
+	  >
+	sub ttvpos(r3),r2	; calculate vertical difference
+
+	if mi,<			; negative, i.e. move up
+	  neg r2		; make positive
+	  asl r2		; times two to get cost
+	  >
+	sub tthpos(r3),r1	; calculate horizontal difference
+	neg r1			; make backwards difference
+	if mi,<			; negative, i.e. move forward
+	  neg r1		; make positive
+	  asl r1		; times two to get cost
+	  >
+	add r1,r2		; add horizontal and vertical costs
+	cmp r2,r0		; relative move better than best so far?
+	if lo,<			; yes
+	  mov r2,r0		; set minimum cost so far to that of rel move
+	  clr (sp)		; change to "relative move"
+	  >
+	sub r1,r2		; get back vertical cost
+	add thpos(r3),r2	; add 2H + 1 which is cost of CR and
+	add thpos(r3),r2	; relative movement
+	inc r2			; ...
+	cmp r2,r0		; CR and relative move better than best so far?
+	if lo,<			; yes
+	  mov #15,r0		; TOI arg: character
+	  call toi		; output CR
+	  clr tthpos(r3)	; keep track of movement
+	  clr (sp)		; now do "relative movement"
+	  >
+	add (sp)+,pc		; dispatch on best method found
+	br 2$			; "relative move"
+	br 1$			; "home and relative move"
+				; "direct cursor address"
+	pop (sp)		; remove arg from stack
+	retrn2			; return2 to indicate direct cursor move
+				; is best
+1$:	  twrite ^"[H"		; move to upper left corner of screen ("home")
+	clr ttvpos(r3)		; account for home operation
+	clr tthpos(r3)		; ...
+2$:	cmp ttvpos(r3),tvpos(r3)	; reached desired vertical position?
+	beq 3$				; yes
+	if lo,<			; above desired vertical position
+	  mov #12,r0		; TOI arg: character
+	  call toi		; output LF to move down one line
+	  inc ttvpos(r3)	; keep track of movement
+	  br 2$
+	  >
+	twrite ^"[A"		; output ESC A to move up one line
+	dec ttvpos(r3)		; keep track of movement
+	br 2$
+3$:	cmp tthpos(r3),thpos(r3)	; reached desired horizontal position?
+	beq 4$				; yes
+	if hi,<			; right of desired horizontal position
+	  mov #10,r0		; TOI arg: character
+	  call toi		; output BS to move left one column
+	  dec tthpos(r3)	; keep track of movement
+	  br 3$
+	  >
+				; left of desired horizontal position
+        twrite ^"[C"		; output ESC C to move right one column
+	inc tthpos(r3)		; keep track of movement
+	br 3$
+4$:	pop (sp)		; remove arg from stack
+	retrn1			; return1 for relative move (already done)
+
+
+
+
+.sbttl  VT100 / VT132 terminal support
+
+vt1in===ttyin
+vt1ers===ttyers
+vt1bel===ttybel
+
+
+.macro	vtwrit t
+	jsr r5,toisc
+	  .string ^~t~
+	push #1			; VT1FLL arg: number of fill characters
+	jsr r5,vt1fll		; send them
+.endm
+
+; send commands to VT132
+vt1ini: vtwrit ^"<"		; ANSI mode
+	vtwrit ^"[0m"		; no character attributes
+	vtwrit ^"[0}"		; no fields protected
+	vtwrit ^"[1;2q"	; turn LEDs 1 & 2 on
+	vtwrit ^"[1;24r"	; define scroll region to be the whole screen.
+        vtwrit ^">"		; Numeric keypad
+	vtwrit ^"[20l"		; linefeed mode
+	vtwrit ^"[?4l"		; jump scroll mode
+	vtwrit ^"[?5l"		; normal video
+	vtwrit ^"[?6l"		; absolute origin for movement
+	cmp thmax(r3),#132.-1	; 132 column mode??
+	if eq,<
+	  vtwrit ^"[?3h"	; 132 column mode
+	>
+	else <
+	  vtwrit ^"[?3l"	; 80 column mode
+	>
+	push #126.		; VT1FLL arg: number of fill characters
+	call vt1fll		; send many fill characters for column
+				; mode change
+        vtwrit ^"[?7l"		; Wraparound off
+	vtwrit ^"[?8h"		; Auto repeat on
+	vtwrit ^"[?9l"		; Interlace off
+	vtwrit ^"[?10h"	; Edit off
+
+;;; Clear all TABs, set new ones and return to HOME.
+
+        vtwrit ^"[H"		; return to home
+	vtwrit ^"[3g"		; clear all tabs
+	mov #16.,r0		; number of TAB stops to set
+loop <    vtwrit ^"        H"	; move over 8 spaces and set a TAB
+	  sorl r0
+	  >
+        vtwrit ^"[H"		; return to home
+	vtwrit ^"[?2l"		; enter VT52 mode
+	jmp vtini
+
+; Output to terminal post processing
+vt1out===vtout
+
+; Erase to end of line
+vt1eol===vteol
+
+; Erase to end of screen
+vt1eos===vteos
+
+vt1ff===vt1eos
+
+; Cursor movement
+vt1mov===vtmov
+
+; Standout mode 0 - normal
+vt1so0===vtso0
+
+; Standout mode 1 - blinking
+vt1so1===vtso1
+
+; Standout mode 2 - reverse video
+vt1so2===vtso2
+
+; Standout mode 3 - blinking reverse video
+vt1so3===vtso3
+
+
+vt1fll:	cmp ospeed(r3),#120.	; 1200 baud or less???
+	if le,<			; no, don't pad
+	  pop (sp)		; remove arg
+	  return		; and return
+	  >
+	push (sp)
+	clr 2(sp)		; TSENDN arg: character (# of times on stack)
+	jmp tsendn		; send fill characters
+
+
+
+cvd1:	mov #'0,r0		; TYPEC arg: char
+	call toi		; send a 0 (first digit always 0)
+cvd2:	clr r0			; for DIV
+	div #10.,r0		; get tens in r0, ones in r3
+	add #'0,r0
+	call toi		; type tens
+	mov r1,r0
+	add #'0,r0
+	call toi		; type ones
+	return
+
+.sbttl	HP2645
+
+.if df %tnhp			; assemble only if we have one
+
+hpers===ttyers
+hpeol===vteol
+hpeos===vteos
+hpbel===ttybel
+hpff===vteos
+
+; Initialize
+hpini:	twrite ^"HJ"		; home
+	clr tthpos(r3)
+	clr ttvpos(r3)
+	clr thpos(r3)
+	clr tvpos(r3)
+	return
+
+hpout===vt1out
+
+; HP2645 input
+hpin:	cmp r0,#137		; underscore?
+	if eq,<
+	  mov #177,r0		; change to DEL
+	  return
+	  >
+	cmp r0,#177		; DEL?
+	if eq,<
+	  mov #137,r0		; change to underscore
+	  >
+	return
+
+
+; Standout mode 0 - normal
+hpso0:	twrite ^"&d@"
+	return
+
+; Standout mode 1 - blinking
+hpso1:	twrite ^"&dA"
+	return
+
+; Standout mode 2 - reverse video
+hpso2:	twrite ^"&dB&a79C"
+	mov #79.,tthpos(r3)
+	return
+
+; Standout mode 3 - blinking reverse video
+hpso3:	twrite ^"&dC&a79C"
+	mov #79.,tthpos(r3)
+	return
+
+
+; Cursor movement
+hpmov:	push r0,r1,r2		; save regs
+	push #9			; TERMOV arg: cost of direct cursor addressing
+	call termov		; see if relative move is best
+	  br 1$			; return1, relative move done
+	twrite ^"&a"		; send HP screen relative cursor code
+	mov tvpos(r3),r1	; get vertical position
+	call cvd2		; output vpos as two digits
+	mov #'r,r0
+	call toi		; tell HP that was vertical coordinate
+	mov thpos(r3),r1	; get horizontal position
+	call cvd2		; output hpos as two digits
+	mov #'C,r0
+	call toi		; tell HP that was horizontal position
+	mov tvpos(r3),ttvpos(r3)
+	mov thpos(r3),tthpos(r3)
+1$:	pop r2,r1,r0		; restore regs
+	return
+.endc
+
+.sbttl	StupidBee
+
+.if df %tnsb
+sbini===hpini
+sbout===ttynop
+sbers===ttyers
+sbeol===vteol
+sbeos===vteos
+sbbel===ttybel
+sbff===vteos
+
+; StupidBee input
+sbin:	bit #%toesc,topt(r3)
+	if ne,<
+	  bic #%toesc,topt(r3)
+	  cmp r0,#'C
+	  if eq,<
+	    mov #40,r0
+	    br 1$
+	    >
+	  cmp r0,#'p
+	  if eq,<
+	    mov #33,r0
+	    br 1$
+	    >
+	  cmp r0,#'q
+	  bne 1$
+	  mov #3,r0
+	  br 1$
+	  >
+	cmp r0,#33
+	if eq,<
+	  bis #%toesc,topt(r3)
+	  jmp ti
+	  >
+1$:	return
+
+
+; Standout mode 0 - normal
+sbso0:	twrite ^"_3"
+	return
+
+; Standout mode 1 - blinking
+sbso1:	twrite ^"_0"
+	inc thpos(r3)
+	inc tthpos(r3)
+	return
+
+; Standout mode 2 - reverse video
+sbso2:	twrite ^"_1"
+	inc thpos(r3)
+	inc tthpos(r3)
+	return
+
+; Standout mode 3 - blinking reverse video
+sbso3:	twrite ^"_2"
+	inc thpos(r3)
+	inc tthpos(r3)
+	return
+
+
+; Cursor movement
+sbmov:	push r0,r1,r2		; save regs
+	push #8.		; TERMOV arg: cost of direct cursor addressing
+	call termov		; see if relative move is best
+	  br 1$			; return1, relative move done
+	twrite ^"F"		; send SB cursor position code 
+	mov thpos(r3),r1
+	call cvd1		; send three digit horizontal pos
+	mov tvpos(r3),r1
+	call cvd1		; send three digit vertical pos
+	mov tvpos(r3),ttvpos(r3)
+	mov thpos(r3),tthpos(r3)
+1$:	pop r2,r1,r0		; restore regs
+	return
+
+
+.endc
+
+.sbttl	Terminet 1200
+
+.if df %tntrm
+trmini===ttyini
+trmin===ttyin
+trmout===ttyout
+trmers===ttyers
+trmeol===ttyeol
+trmeos===ttyeos
+trmso0===ttyso0
+trmso1===ttyso1
+trmso2===ttyso2
+trmso3===ttyso3
+trmbel===ttybel
+trmmov===ttymov
+trmff===ttyff
+.endc
+
+; LA120 DecWriter III
+
+la1in===ttynop
+la1out===ttynop
+la1eol===ttynop
+la1so0===ttynop
+la1so1===ttynop
+la1so2===ttynop
+la1so3===ttynop
+la1ini===ttyini
+la1ers===ttyers
+la1bel===ttybel
+la1mov===ttymov
+la1eos===ttyeos
+
+la1ff:	mov #14,r0		; tell the LA120 to do the form feed
+	call toi
+	clr thpos(r3)
+	clr tvpos(r3)
+	return
+
+; LA180 DECprinter1
+
+.if df %tnla8
+la8in===ttynop
+la8out===ttynop
+la8eol===ttynop
+la8so0===ttynop
+la8so1===ttynop
+la8so2===ttynop
+la8so3===ttynop
+la8ini===ttyini
+la8ers===ttyers
+la8bel===ttybel
+la8mov===ttymov
+la8eos===ttyeos
+la8ff===la1ff
+.endc
+
+; TOISC takes a relative ptr to an asciz string and outputs it.
+toisc:	push r1			; save reg
+	mov r5,r1		; get relative ptr to asciz string
+	add (r5)+,r1		; make absolute
+	call tois
+	pop r1			; restore reg
+	rts r5
+
+; TOIS takes a ptr to an asciz string in R1 and outputs it.
+tois:	push r0			; save reg
+loop <	  movb (r1)+,r0		; TOI arg: character
+	  exitl eq		; null terminates string
+	  call toi		; send character
+	  rptl
+	  >
+	pop r0			; restore reg
+	return
+
+
+; TOI sends the character in R0 to the line specified in the TLINEN
+; entry of the tty structure.
+toi:	push tlinen(r3),r0	; ALWRIT args: line no., character
+	call alwrit		; send character to line
+	return
+
+
+; TSENDN sends the specified no. of characters.
+
+;	ARGS:				VALS:
+; SP ->	character			(none)
+;	no. of characters
+
+tsendn:	push r0			; save reg
+	mov 4(sp),r0		; TOI arg: character to send
+loop <	  dec 6(sp)		; decrement no. of pad characters
+	  exitl mi
+	  call toi		; output character
+	  rptl
+	  >
+	pop r0,(sp),(sp)	; restore reg, remove arg from stack
+	return

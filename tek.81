@@ -1,0 +1,427 @@
+; -*-PALX-*-
+
+.sbttl	Tektronix support
+; Tektronix 4662 support.  This code could easily be modified to support
+; Tektronix 4010 series graphics terminals.  TEKBEG, TEKEND, and TEKO
+; would need to be changed; also TEKDRW would need to know not to send
+; a XLOY byte to the 4010, 4011, or 4012.
+
+
+; TEKROT sets the rotation to be used for drawing characters.
+
+;	ARGS:				VALS:
+; SP ->	no. of degrees			(none)
+
+tekrot:	push r0			; save reg
+	call teksb		; output any buffered text
+	jsr pc,tekbb		; restart buffering co-routine
+	pop teksw		; save co-routine PC
+	mov 4(sp),tkrot		; save the no. of degrees of rotation
+	call tekrst		; reset the plotter
+	pop r0,(sp)		; restore reg, remove argument from stack
+	return
+
+
+; TEKSIZ sets the size of characters.
+
+;	ARGS:				VALS:
+; SP ->	horizontal size			(none)
+;	vertical size
+
+teksiz:	push r0			; save reg
+	call teksb		; output any buffered text
+	jsr pc,tekbb		; restart buffering co-routine
+	pop teksw		; save co-routine PC
+	mov 4(sp),tksizx	; save the x-dimension
+	mov 6(sp),tksizy	; save the y-dimension
+	call tekrst		; reset the plotter
+	pop r0,(sp),(sp)	; restore reg, remove arguments from stack
+	return
+
+
+; TEKSTR draws a string of characters on the Tektronix.
+
+;	ARGS:				VALS:
+; SP ->	no. of characters		(none)
+;	buffer ptr
+
+tekstr:	tst 2(sp)		; zero characters?
+	beq 1$			; yes, return immediately
+loop <	  movb @4(sp),-(sp)	; TEKASC arg: character
+	  inc 4+2(sp)		; increment ptr
+	  call tekasc		; output character from string
+	  dec 2(sp)		; decrement no. of characters
+	  rptl ne		; keep going until all done
+	  >
+1$:	pop (sp),(sp)		; remove args from stack
+	return
+
+
+; TEKASC draws a character on the Tektronix.
+
+;	ARGS:				VALS:
+; SP ->	character			(none)
+
+tekasc:	tst gsw			; already out of graphics mode?
+	if ne,<
+	  push #37		; TEKO arg: character
+	  call teko		; send US to exit graphics mode
+	  clr gsw		; remember we're out of graphics mode
+	  >
+	jmp teko		; output character and return
+
+; TEKLIN draws a line between two points.
+
+;	ARGS:				VALS:
+; SP ->	x2				(none)
+;	y2
+;	x1
+;	y1
+
+teklin:	jsr r5,save6		; save regs
+; calculate d2 = (x0-x2)^2+(y0-y2)^2
+	mov tekx,r0
+	sub 16(sp),r0
+	mul r0,r0
+	mov teky,r2
+	sub 20(sp),r2
+	mul r2,r2
+	add r3,r1
+	adc r0
+	add r2,r0
+; calculate d1 = (x0-x1)^2+(y0-y1)^2
+	mov tekx,r2
+	sub 22(sp),r2
+	mul r2,r2
+	mov teky,r4
+	sub 24(sp),r4
+	mul r4,r4
+	add r5,r3
+	adc r2
+	add r4,r2
+; compare d1 and d2
+	cmp r2,r0
+	blo 1$
+	bhi 2$
+	cmp r3,r1
+	bhi 2$
+1$:	push 24(sp),22+2(sp)	; TEKMOV args: y coordinate, x coordinate
+	call tekmov		; move to x1,y1
+	push 20(sp),16+2(sp)	; TEKDRW args: y coordinate, x coordinate
+	call tekdrw		; draw to x2,y2
+	br 3$
+2$:	push 20(sp),16+2(sp)	; TEKMOV args: y coordinate, x coordinate
+	call tekmov		; move to x2,y2
+	push 24(sp),22+2(sp)	; TEKDRW args: y coordinate, x coordinate
+	call tekdrw		; draw to x1,y1
+3$:	jsr r5,rest6		; restore regs
+	pop 6(sp)		; move up return R5
+	add #6,sp		; remove args from stack
+	return
+
+
+; TEKMOV moves the cursor to the specified position.
+
+;	ARGS:				VALS:
+; SP ->	x coordinate			(none)
+;	y coordinate
+
+tekmov:	push #35		; TEKO arg: character
+	call teko		; send GS to (re)enter graphics mode
+	tst gsw			; already in graphics mode?
+	if eq,<			; no
+	  mov #-1,hiy		; set current position to -1 thus forcing
+	  mov #-1,loy		; the next address to be sent in full
+	  mov #1,gsw		; remember we're now in graphics mode
+	  >
+				; fall into TEKDRW to send position
+
+; TEKDRW draws a vector from the current cursor position to the specified
+; position.
+
+;	ARGS:				VALS:
+; SP ->	x coordinate			(none)
+;	y coordinate
+
+tekdrw:	push r0,r1,r2		; save regs
+	tst gsw			; already in graphics mode?
+	if eq,<
+	  push #35		; TEKO arg: character
+	  call teko		; send GS to enter graphics mode
+	  push #7		; TEKO arg: character
+	  call teko		; send BELL to make first vector visible
+	  inc gsw		; remember we're in graphics mode
+	  mov #-1,hiy		; set current position to -1 thus forcing
+	  mov #-1,loy		; the next address to be sent in full
+	  >
+	mov pc,r0		; ptr to current position
+	add #hiy-.,r0		; ...
+	mov pc,r1		; ptr to save area
+	add #ohiy-.,r1		; ...
+	mov (r0)+,(r1)+		; save 5 old address bytes
+	mov (r0)+,(r1)+		; ...
+	movb (r0)+,(r1)+	; ...
+
+; Compute address bytes for specified position.
+
+ 	mov 12(sp),r1		; get y coordinate
+	mov r1,teky		; save last y coordinate
+	mov r1,r0		; get low 2 bits of y coordinate
+	bic #177774,r0		; ...
+	ash #2,r0		; shift to put into bits 4:3 of XLOY byte
+	bis #140,r0		; put 11 in tag bits to identify as XLOY byte
+	movb r0,xloy		; save XLOY
+	mov r1,r0		; get next 5 bits of y coordinate
+	ash #-2,r0		; ...
+	bic #177740,r0		; ...
+	bis #140,r0		; put 11 in tag bits to identify as LOY
+	movb r0,loy		; save LOY
+	asl r1			; get high 5 bits of y coordinate
+	swab r1			; ...
+	bic #177740,r1		; ...
+	bis #040,r1		; put 01 in tag bits to identify as HIY
+	movb r1,hiy		; save HIY
+	mov 10(sp),r1		; get x coordinate
+	mov r1,tekx		; save last x coordinate
+	mov r1,r0		; get low 2 bits of x coordinate
+	bic #177774,r0		; ...
+	bisb r0,xloy		; add to XLOY byte
+	mov r1,r0		; get next 5 bits of x coordinate
+	ash #-2,r0		; ...
+	bic #177740,r0		; ...
+	bis #100,r0		; put 10 in tag bits to identify as LOX
+	movb r0,lox		; save LOX
+	asl r1			; get high 5 bits of x coordinate
+	swab r1			; ...
+	bic #177740,r1		; ...
+	bis #040,r1		; put 01 in tag bits to identify as HIX
+	movb r1,hix		; save HIX
+
+; Computed new address bytes, now see which haven't changed so don't have
+; so send all five.
+
+	mov #hiy,r0		; ptr to computed address bytes
+	mov #ohiy,r1		; ptr to previous address bytes
+	mov #20,r2		; R2 will be mask of which to send, init to LOX
+	cmpb (r0)+,(r1)+	; HIY changed?
+	if ne,<
+	  bis #21,r2		; yes, send HIY and LOX
+	  >
+	cmpb (r0)+,(r1)+	; XLOY changed?
+	if ne,<
+	  bis #26,r2		; yes, send XLOY, LOY, and LOX
+	  >
+	cmpb (r0)+,(r1)+	; LOY changed?
+	if ne,<
+	  bis #24,r2		; yes, send LOY and LOX
+	  >
+	cmpb (r0)+,(r1)+	; HIX changed?
+	if ne,<
+	  bis #34,r2		; yes, send LOY, HIX, and LOX
+	  >
+	mov #hiy,r1		; ptr to address bytes
+loop <	  movb (r1)+,r0		; get next byte
+	  asr r2		; test mask to see if it needs to be sent
+	  if cs,<
+	    push r0		; TEKO arg: character
+	    call teko		; send this address byte
+	    >
+	  tst r2		; any more to send?
+	  rptl ne
+	  >
+	pop r2,r1,r0		; restore regs
+	pop (sp),(sp)		; remove args from stack
+	return
+
+
+gsw:	.word 0			; nonzero if in grahpics mode
+tekx:	.word 0			; last x coordinate
+teky:	.word 0			; last y coordinate
+hiy:	.byte -1
+xloy:	.byte -1
+loy:	.byte -1
+hix:	.byte -1
+lox:	.byte -1
+.even
+ohiy:	.byte -1
+oxloy:	.byte -1
+oloy:	.byte -1
+ohix:	.byte -1
+olox:	.byte -1
+.even
+
+; TEKO sends a character to the Tektronix 4662.
+
+;	ARGS:				VALS:
+; SP ->	character			(none)
+
+teko:	push r0			; save reg
+	mov 4(sp),r0		; get data character
+	jsr pc,@teksw		; call buffering co-routine
+	pop teksw		; save co-routine PC
+	pop r0,(sp)		; restore reg, remove arg
+	return
+
+
+
+teklno==2			; Line no. of Tek4662
+ltekb==250.			; if this changes then the constant
+				; in TEKBEG will have to change also
+
+
+; TEKBEG is called to prepare the Tek4662 for plotting.
+tekbeg: push (sp)		; make room for return value
+	tst tekuse		; plotter in use?
+	if ne,<
+	  mov #%enadv,2(sp)	; return error code
+	  return
+	  >
+	inc tekuse		;say we are using the plotter
+	clr 2(sp)		; no error on getting the plotter
+	push #teklno		; ALWRIZ arg: line no.
+	call alwriz		; send Reset, Blocksize, Plotter On
+	  .string ^"ANAH256AE"
+	clr gsw			; indicate not in graphics mode
+	mov #56.,tksizx		; set default x-size
+	mov #88.,tksizy		; set default y-size
+	clr tkrot		; set default no. of degrees of rotation
+	jsr pc,tekbb		; setup block buffering co-routine
+	pop teksw		; save co-routine PC
+	return
+
+
+; TEKEND is called to terminate Tek4662 plotting.
+tekend:	push #3124.,#4095.	; TEKMOV args: y,x
+	call tekmov		; move to upper right hand corner
+	call teksb		; send any stuff remaining in buffer
+	push #teklno		; ALWRIZ arg: line no.
+	call alwriz		; send Reset, Plotter Off
+	  .string ^"ANAF"
+	clr tekuse		; no one is using the plotter now
+	return
+
+
+; TEKBB is a co-routine which buffers a block to output to the Tek4662.
+tekbb:	clr tekcnt		; start byte count at zero
+	push pc			; ptr to TEKBUF
+	add #tekbuf-.,(sp)	; ...
+	pop tekbp		; set TEKBP (buffer ptr)
+loop <	  jsr pc,@(sp)+		; get character
+	  movb r0,@tekbp	; put character into buffer
+	  inc tekbp		; update buffer ptr
+	  inc tekcnt		; and count
+	  cmp tekcnt,#ltekb	; filled the buffer?
+	  rptl lo
+	  >
+	call teksb		; send the buffer as a block
+	br tekbb
+
+
+; TEKSB sends the current block being buffered.
+teksb:	jsr r5,save6		; save regs
+	mov #4,r3		; no. of times to retry errors
+1$:	mov tekcnt,r1		; get no. of characters in buffer
+	beq 3$			; return if none
+	sub r1,tekbp		; move ptr to beginning of buffer
+	push #teklno		; ALWRIZ arg: line no.
+	call alwriz		; send Block Start
+	  .string ^"A("
+	mov #'(+'+'A+'),r2	; init checksum to Block start/end commands
+loop <	  movb @tekbp,r0	; get character from buffer
+	  inc tekbp		; update buffer ptr
+	  push #teklno,r0	; ALWRIT args: line no., character
+	  call alwrit		; send character to plotter
+	  add r0,r2		; add character to checksum
+	  cmp r2,#4095.		; overflow?
+	  if hi,<
+	    sub #4095.,r2	; yes, do end around carry
+	    >
+	  sorl r1
+	  >
+	push #teklno		; ALWRIZ arg: line no.
+	call alwriz		; send Block End
+	  .string ^"A)"
+	mov r2,r0		; TEKNUM arg: number
+	call teknum		; send checksum to plotter as decimal number
+	push #teklno,#15	; ALWRIT args: line no., character
+	call alwrit		; send checksum terminator
+2$:	push #teklno,#2*60.*60. ; ALREAD args: line no., timeout
+	call alread		; read response
+	pop r0,*		; vals: character, error code
+	if ne,<
+4$:	  mov pc,tekerr		; say there was an error
+	  call sysmsg		; print message on system console
+	    .string ^"Plotter not responding
+"
+	  br 3$
+	  >
+	cmp r0,#'A		; A?
+	beq 3$			; yes, block ok
+	cmp r0,#'I		; I?
+	bne 2$			; ignore anything else
+	call sysmsg		; print message on system console
+	  .string ^"Plotter Error
+"
+	push #teklno		; ALWRIZ arg: line no.
+	call alwriz		; send RESET, Blocksize, Plotter On
+	  .string ^"ANAH256AE"
+	call tekrst		; reset the character sizes and rotation
+	dec r3			; give up after 4 attempts
+	bne 1$			; not zero yet
+	mov pc,tekerr		; non-recoverable error
+3$:	push #30.*5.		; wait 2.5 seconds for plotter to plot
+	call twfor		; ....
+	jsr r5,rest6		; restore regs
+	return
+
+
+; TEKRST resets the character size, and the character rotation
+
+tekrst:	push #teklno		; ALWRIZ arg: line no.
+	call alwriz		; send plotter on, alpha rotate commands
+	  .string ^"AEAJ"
+	mov tkrot,r0		; TEKNUM arg: number
+	call teknum		; output degrees to plotter as decimal no.
+	push #teklno		; ALWRIZ arg: line no.
+	call alwriz		; send plotter on, alpha scale commands
+	  .string ^"AEAI"
+	mov tksizx,r0		; TEKNUM arg: number
+	call teknum		; output horizontal size
+	push #teklno,#54	; ALWRIT args: line no., character
+	call alwrit		; output delimeter (comma)
+	mov tksizy,r0		; TEKNUM arg: number
+	call teknum		; output vertical size
+	push #teklno,#15	; ALWRIT args: line no., character
+	call alwrit		; output terminator
+	return
+
+
+; TEKNUM outputs a number in decimal to the Tek4662.
+
+;	ARGS:				VALS:
+; R0:	number				(none)
+
+teknum:	push r1			; save reg
+	mov r0,r1		; setup for DIV
+	clr r0			; ...
+	div #10.,r0		; divide number by 10
+	tst r0			; quotient nonzero?
+	if ne,<
+	  call teknum		; yes, call self to convert quotient
+	  >
+	add #'0,r1		; remainder is digit, convert to ASCII
+	push #teklno,r1		; ALWRIT args: line no., character
+	call alwrit		; output digit
+	pop r1			; restore reg
+	return
+
+
+
+; Tektronix 4662 output buffering stuff
+teksw:	.blkw 1			; Tektronix 4662 co-routine switch
+tekbuf:	.blkb ltekb		; Tektronix 4662 buffer
+tekcnt:	.blkw 1			; Tektronix 4662 buffer count
+tekbp:	.blkw 1			; Tektronix 4662 buffer ptr
+tkrot:	.word 0			; amount of character rotation
+tksizx:	.word 56.		; character size x-direction
+tksizy:	.word 88.		; character size y-direction

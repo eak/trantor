@@ -1,0 +1,639 @@
+;					-*-PALX-*-
+;SPINPRINT command.  Command is used to send files to the spinwriter.  ^L is
+;used to seperate the text into different pages.  The user is queried before
+;each page is printed.
+
+ifSAO <
+        splnno==2		; spinwriter is terminal 4 at SAO's
+      >
+ifMIT <
+        splnno==<10.-1>		; spinwriter is terminal 10 - 1
+				; (because of plotter) at MIT
+      >
+
+sptype: mov #splnno,r2		; get spinwriter terminal number
+	asl r2			; mdouble for lookup in table
+        add pc,r2		; get pointer into tty channel id table
+	add #ttych-.,r2		; ....
+	mov (r2),r2		; get channel id for TTY
+	push r2,#2		; ORDER args: channel id, order code
+	push #%tcio		; ORDER arg: (cbit to turn on)
+	call order		; turn image mode on for the spinwriter
+	pop *			; val: meaningless
+loop   <  call quit		; see if user wants to quit
+	  pop *			; val: non-zero if break typed
+	  exitl ne		; ....
+	  push uich(r4)		; RCHAR arg: input channel
+	  call rchar		; get next character from user
+	  pop r0		; val: character
+	  exitl mi		; -1 returned for eof
+	  cmp #26,r0		; ^Z typed by user?
+	  exitl eq		; yes, we're through
+	  push uoch(r4),r0	; WCHAR args: channel id, character
+	  call wchar		; send character to spinwriter
+	  push r2,r0		; WCHAR args: channel id, character
+	  call wchar		; send character to console
+	  rptl			; go back for more
+	  >
+	rts pc
+
+spinpr: push filep(r4)		; FILARG arg: ptr to filename buffer
+	call filarg		; parse a filename
+	push pc			; ATTACH arg: device id
+	add #dskn-.,(sp)	; ....
+	push filep(r4)		; ATTACH arg: filename
+	push diskno(r4),#0	; ATTACH args: unit #, cbits
+	call attach		; open the file
+	pop r3,r0  		; vals: channel id, error code
+	if ne,<
+	  jmp comerr		; handle error opening file
+	  >
+	mov #1,r5		; r5 contains the page number in the file
+	clr r1			; R1 conains control bits for output
+ifMIT <
+	push #splnno+1,uoch(r4)	; IOAC args: spinwriter number,channel id
+      >
+ifSAO <
+	push #splnno,uoch(r4)	; IOAC args: spinwriter number,channel id
+      >
+	call ioac		; tell user where you think the spinwriter is
+	  .string ^"Assuming the spinwriter is on line number ^d.
+"
+        mov #splnno,r2		; get spinwriter terminal number
+	asl r2			; mdouble for lookup in table
+        add pc,r2		; get pointer into tty channel id table
+	add #ttych-.,r2		; ....
+	mov (r2),r2		; get channel id for TTY
+	push r2,#2		; ORDER args: channel id, order code
+	push #%tcio		; ORDER arg: (cbit to turn on)
+	call order		; turn image mode on for the spinwriter
+	pop *			; val: meaningless
+	br 2$			; start at page one, right away
+loop  <  call quit		; see if user wants to quit
+	 pop *			; VAL: non-zero if we are to quit
+	 bne 3$			; quit this command and cleanup
+	 push r3		; RCHAR arg: channel id
+	 call rchar		; get character
+	 pop r0			; ....
+	 bmi 3$			; if minus then EOF
+	 cmp r0,#14		; check for start of page
+	 rptl ne		; not yet
+2$:	 push r5,uoch(r4)	; IOAC args: page number, channel id
+	 call ioac		; print message
+	   .string ^"Print page #^d ?"
+	 push uoch(r4)		; RCHAR arg: channel id
+	 call rchar		; read a character
+	 pop r0			; got it
+	 push uoch(r4),r0	; WCHAR args: channel id, character
+	 call wchar		; echo the character
+	 jsr pc,crlf		; print a CR
+	 bic #40,r0		; make capitol letter
+	 cmp r0,#'Y		; print this page?
+	 exitl eq		; yes, do it
+	 inc r5			; next page
+	 rptl
+	 >
+       push uoch(r4)		; IOAC arg: channel id
+       call ioac		; send message about Character set
+         .string ^"Alternate Character Set? "
+       push uoch(r4)		; RCHAR arg: channel id
+       call rchar		; get response
+       pop r0			; go it
+       push uoch(r4),r0		; echo it
+       call wchar
+       jsr pc,crlf		; and type a CRLF
+       bic #40,r0		; make capitol letter
+       cmp #'Y,r0		; yes ???
+       if eq,<
+         bis #%rfont,r1		; set mode (font 1 wanted)
+	 >
+       else <
+         bic #%rfont,r1		; clear mode (font 0 wanted)
+	 >
+loop  <  call quit		; see if user wants to quit
+	 pop *			; val: non-zero if we are to quit
+	 bne 3$			; user wants to punt
+	 push r3		; RCHAR arg: channel id
+	 call rchar		; get next character
+	 pop r0			; got it.
+	 bmi 3$			; if minus then EOF
+	 cmpb r0,#14		; is this a break in the page?
+	 exitl eq		; yes!!!
+	 cmpb #12,r0		; a LF??
+	 if eq,<
+	   bit #%dspce,r1	; check for quadruple spacing
+	   if ne,<
+	     push r2,r0		; send an extra LF
+	     call wchar		; ...
+	     push r2,r0		; send an extra LF
+	     call wchar		; ...
+	     >
+	   bit #%space,r1	; check for double spacing
+	   if ne,<
+	     push r2,r0		; send an extra LF
+	     call wchar		; ...
+	     >
+	   br 5$		; send the LF
+	   >
+
+; send all other control-characters as is!!!!!!
+
+	 cmpb r0,#40		; this character a space or control-character??
+	 ble 5$			; yes, just send it
+	 cmpb r0,#'\		; backslash escape character??
+	 if eq,<
+	   jsr r5,spbksl	; handle the next character as special
+	   rptl
+	   >
+	 jsr r5,printp		; print this character???
+	 pop *			; val: non-zero means print else send a space
+	 if ne,<
+	   jsr r5,sendch	; send this character
+	   rptl
+	   >
+	 movb #40,r0		; make character a space
+5$:	 push r2,r0		; WCHAR args: channel id, character
+	 call wchar		; send character to spinwriter
+	 rptl			; do next character
+	 >
+10$:   inc r5			; increment the page number
+       br 2$			; start the next page
+
+; cleanup our act
+
+3$:    push r2,#3		; ORDER args: channel id, order code
+       push #%tcio		; ORDER arg: (cbit to turn off)
+       call order		; turn image mode off for the spinwriter
+       pop *			; val: meaningless
+       push r3			; DETACH arg: channel id
+       call detach		; relesase the file
+       rts pc
+	
+; PRINTP tests to see if we are printing in the requested font
+; non-zero value returned on the stack means we are printing
+; in the requested font.  
+
+printp:  push (sp)		; make room for return value
+	 clr 2(sp)		; assume not printing (fonts not same)
+	 bit #%rfont,r1		; test requested font bit
+	 if ne,<		; set if font 1 wanted
+	   bit #%pfont,r1	; test the printing bit
+	   if ne,<		; if font 1 also then send this character
+	     inc 2(sp)		; tell user to print
+	     >
+	   >
+	 else <
+	   bit #%pfont,r1	; see if printing font 0
+	   if eq,<
+	     inc 2(sp)		; tell user to print
+	     >
+	   >
+	 rts r5
+
+; SENDCH sends a character and hacks boldfacing and underlining
+
+sendch:	push r2,r0		; WCHAR args: channel id, character
+	call wchar		; print character
+	cmpb #40,r0		; just send a space
+	if eq,<
+	  bit #%udral,r1	; should we underline the space
+	  beq 1$		; no
+	  >
+	bit #%under,r1		; underline anything??
+	if ne,<			; yes
+	  push r2		; IOAC arg: channel id
+	  call ioac		; backspace and underline
+	    .string ^"]A]P_ _9= "
+	  >
+	bit #%bold,r1		; boldfacing wanted??
+	if ne,<			; yes
+	  push r2		; IOAC arg: channel id
+	  call ioac		; backspace and change spacing
+	    .string ^"]A "
+	  push r2,r0		; WCHAR args: channel id, character
+	  call wchar		; send character again
+	  push r2		; IOAC arg: channel id
+	  call ioac		; backspace, change spacing and space
+	    .string ^"= "
+	  >
+1$:	rts r5
+
+
+; SPBKSL gets the next character after a backslash and uses it
+; to determine the next thing to do.
+; R0 is the received character
+; R1 is the output control bits
+; R2 is the output channel id
+; R3 is the input channel id
+
+%bold==1			; when set print boldface
+%under==2			; when set print underlines
+%space==4			; when set do double spacing
+%pfont==10			; when set we are printing in font 1
+%rfont==20			; when set font 1 was requested to be printed
+%udral==40			; when set underline spaces and all
+%dspce==100			; when set quadruplespacing is on
+
+spbksl: push r3			; read in the next character
+	call rchar		; ...
+	pop r0			; got it
+	bicb #40,r0		; make it a uppercase or control character
+
+; the following commands send specific commands or character
+; to the spinwriter.
+
+	cmpb #'\,r0		; Escape an escape char??
+	if eq,<
+	  jsr r5,sendch		; send this /
+	  rts r5
+	  >
+	cmpb #'@,r0		; @?? (send a ^L to the spinwriter)
+	if eq,<
+	  push r2,#14		; WCHAR args: channel id, character
+	  call wchar		; send a FF
+	  rts r5
+	  >
+	cmpb #'U,r0		; U?? (move up one line)
+	if eq,<
+	  push r2		; IOAC arg: channel id
+	  call ioac		; send commands to spinwriter
+	    .string ^"9"
+	  rts r5
+	  >
+	cmpb #'D,r0		; D?? (move down one line)
+	if eq,<
+	  push r2,#12		; WCHAR args: channel id, character
+	  call wchar		; send a LF
+	  rts r5
+	  >
+	cmpb #'0-40,r0		; 0?? (move up one-twelfth of an inch)
+	if eq,<
+	  push r2		; IOAC arg: channel id
+	  call ioac		; send commands to spinwriter
+	    .string ^"]Q9="
+	  rts r5
+	  >
+	cmpb #'1-40,r0		; 1?? (move down one-twelfth of an inch)
+	if eq,<
+	  push r2		; IOAC arg: channel id
+	  call ioac		; send commands to spinwriter
+	    .litrl <
+	      .ascii "]S"
+	      .byte 12
+	      .ascii "9="
+	      >
+	  rts r5
+	  >
+	cmpb #'N,r0		; N?? (shift in)
+	if eq,<
+	  push r2,#17		; WCHAR args: channel id, character
+	  call wchar		; send a SI (shift in)
+	  rts r5
+	  >
+	cmpb #'O,r0		; O?? (shift out)
+	if eq,<
+	  push r2,#16		; WCHAR args: channel id, character
+	  call wchar		; send a SO (shift out)
+	  rts r5
+	  >
+	cmpb #'H,r0		; H?? (backspace)
+	if eq,<
+	  push r2,#10		; WCHAR args: channel id, character
+	  call wchar		; send a LF
+	  rts r5
+	  >
+
+; Set and reset commands for spinwriter
+
+	cmpb #'L,r0		; L?? (set Left Margin)
+	if eq,<
+	  push r2		; IOAC arg: channel id
+	  call ioac		; send commands to spinwriter
+	    .string ^"M"
+	  rts r5
+	  >
+	cmpb #'M,r0		; M?? (reset Left Margin)
+	if eq,<
+	  push r2		; IOAC arg: channel id
+	  call ioac		; send commands to spinwriter
+	    .string ^"O"
+	  rts r5
+	  >
+	cmpb #'J,r0		; J?? (set Right Margin)
+	if eq,<
+	  push r2		; IOAC arg: channel id
+	  call ioac		; send commands to spinwriter
+	    .string ^"J"
+	  rts r5
+	  >
+	cmpb #'K,r0		; K?? (reset Right Margin)
+	if eq,<
+	  push r2		; IOAC arg: channel id
+	  call ioac		; send commands to spinwriter
+	    .string ^"K"
+	  rts r5
+	  >
+	cmpb #'S,r0		; S?? (Reset Horizontal Tab)
+	if eq,<
+	  push r2		; IOAC arg: channel id
+	  call ioac		; send commands to spinwriter
+	    .string ^"2"
+	  rts r5
+	  >
+	cmpb #'T,r0		; T?? (Set Horizontal Tab)
+	if eq,<
+	  push r2		; IOAC arg: channel id
+	  call ioac		; send commands to spinwriter
+	    .string ^"1"
+	  rts r5
+	  >
+
+	cmpb #'V,r0		; V?? (read and restore panel switches)
+	if eq,<
+	  push r2		; IOAC arg: channel id
+	  call ioac		; send commands to spinwriter
+	    .string ^"="
+	  rts r5
+	  >
+
+; the following commands change the forms advance control
+
+	cmpb #'C,r0		; C?? (change advance to 1/48 LPI)
+	if eq,<
+	  push r2		; IOAC arg: channel id
+	  call ioac		; send commands to spinwriter
+	    .string ^"]P"
+	  rts r5
+	  >
+	cmpb #'E,r0		; E?? (change advance to 2/48 LPI)
+	if eq,<
+	  push r2		; IOAC arg: channel id
+	  call ioac		; send commands to spinwriter
+	    .string ^"]Q"
+	  rts r5
+	  >
+	cmpb #'F,r0		; F?? (change advance to 4/48 LPI)
+	if eq,<
+	  push r2		; IOAC arg: channel id
+	  call ioac		; send commands to spinwriter
+	    .string ^"]S"
+	  rts r5
+	  >
+	cmpb #'G,r0		; G?? (change advance to 6/48 LPI)
+	if eq,<
+	  push r2		; IOAC arg: channel id
+	  call ioac		; send commands to spinwriter
+	    .string ^"]U"
+	  rts r5
+	  >
+	cmpb #'I,r0		; I?? (change advance to 8/48 LPI)
+	if eq,<
+	  push r2		; IOAC arg: channel id
+	  call ioac		; send commands to spinwriter
+	    .string ^"]W"
+	  rts r5
+	  >
+	cmpb #'+-40,r0		; +?? (change advance to 12/48 LPI)
+	if eq,<
+	  push r2		; IOAC arg: channel id
+	  call ioac		; send commands to spinwriter
+	    .string ^"]["
+	  rts r5
+	  >
+	cmpb #'--40,r0		; -?? (change advance to 16/48 LPI)
+	if eq,<
+	  push r2		; IOAC arg: channel id
+	  call ioac		; send commands to spinwriter
+	    .string ^"]_"
+	  rts r5
+	  >
+
+; the following are requests to the spinwriting program and set
+; specific bits in R1.
+
+	cmpb #'A,r0		; A?? (alternate character font)
+	if eq,<
+	  bis #%pfont,r1	; tell program font changed to alternate
+	  rts r5
+	  >
+	cmpb #'5-40,r0		; 5?? (select normal font)
+	if eq,<
+	  bic #%pfont,r1	; tell program font is now the normal font
+	  rts r5
+	  >
+	cmpb #'B,r0		; B?? (Boldfacing requested)
+	if eq,<
+	  bis #%bold,r1		; tell program to boldface
+	  rts r5
+	  >
+	cmpb #'6-40,r0		; 6?? (Turn off boldfacing)
+	if eq,<
+	  bic #%bold,r1		; tell program no more boldfacing
+	  rts r5
+	  >
+	cmpb #'_,r0		; _?? (Underlining requested)
+	if eq,<
+	  bis #%under,r1	; turn on underlining
+	  rts r5
+	  >
+	cmpb #'4-40,r0		; 4?? (turn off underlining mode)
+	if eq,<
+	  bic #%under,r1	; tell program no more underlining
+	  rts r5
+	  >
+	cmpb #'R,r0		; R?? (Normal mode output)
+	if eq,<
+	  bic #%pfont+%under+%bold+%udral,r1
+				; turn off boldfacing and underlining
+	  rts r5		; and reset to font0 being printed
+	  >
+	cmpb #'P,r0		; P?? (single spacing on)
+	if eq,<
+	  bic #%space+%dspce,r1	; turn on single spacing
+	  rts r5
+	  >
+	cmpb #'Q,r0		; Q?? (double spacing on)
+	if eq,<
+	  bis #%space,r1	; turn on double spacing
+	  bic #%dspce,r1	; turn off quadruple spacing
+	  rts r5
+	  >
+	cmpb #'9-40,r0		; 9?? (double spacing on)
+	if eq,<
+	  bis #%space+%dspce,r1	; turn on quadruple spacing
+	  rts r5
+	  >
+	cmpb #'2-40,r0		; ?? (turn on underline all)
+	if eq,<
+	  bis #%udral+%under,r1	; turn on underline all
+	  rts r5
+	  >
+	cmpb #'3-40,r0		; ?? (turn off underline all)
+	if eq,<
+	  bic #%udral,r1	; turn off underline all
+	  rts r5
+	  >
+
+; following two are No-ops
+
+	cmpb #15,r0		; CR???
+	if eq,<
+	  push r3		; RCHAR arg: channel id
+	  call rchar		; punt the next character (probably a LF)
+	  pop *			; val: char, punt it
+	  rts r5		; do nothing
+	  >
+	cmpb #12,r0		; LF??
+	if eq,<
+	  push r3		; RCHAR arg: channel id
+	  call rchar		; punt the next character (probably a CR)
+	  pop *			; val: char, punt it
+	  rts r5
+	  >
+
+; special characters  (large [, ], |, and /.)
+; integral sign,summation sign, and DEL operator.
+
+	jsr r5,printp		; find out whether we are printing stuff
+        cmpb #'W,r0		; W?? (DEL operator requested)
+	if eq,<
+	  pop *			; PRINTP val: non-zero implies print
+	  if ne,<
+	    push r2		; IOAC arg: channel id
+	    call ioac		; print string of chars forming DEL
+	      .litrl <
+	        .ascii "]@J]U9]C "
+		.byte 17,137,12,57,10,10,10
+		.asciz "= "
+	        >
+             >
+	  else <
+	     jmp sendsp		; send a space
+	     >
+	 rts r5
+	 >
+	cmpb #'X,r0		; X?? (Large | requested)
+	if eq,<
+	  pop *			; PRINTP val: non-zero implies print
+	  if ne,<
+	    push r2		; IOAC arg: channel id
+	    call ioac		; print string of chars forming large |
+	      .litrl <
+	        .ascii "]S]@9|"
+		.byte 12,12
+		.asciz "|9|= "
+		>
+	      >
+	    else <
+	      jmp sendsp	; send a space
+	      >
+          rts r5
+	  >
+	cmpb #'Y,r0		; Y?? (Summation Sign requested)
+	if eq,<
+	  pop *			; PRINTP val: non-zero implies print
+	  if ne,<
+	    push r2		; IOAC arg: channel id
+	    call ioac		; print string of chars forming a Summation Sign
+	      .litrl <
+	        .ascii "]@]S9~"
+		.byte 12,12
+		.asciz "=]S[9="
+		>
+	      >
+	    else <
+	      jmp sendsp	; send a space
+	      >
+          rts r5
+	  >
+	cmpb #'Z,r0		; Z?? (large / requested)
+        if eq,<
+	  pop *			; PRINTP val: non-zero implies print
+	  if ne,<
+	    push r2		; IOAC arg: channel id
+	    call ioac		; print string of chars forming a large /
+	      .litrl <
+	        .ascii "]D]T"
+		.byte 12
+		.ascii "/9/9/"
+		.byte 12
+		.asciz "    ="
+		>
+	      >
+	    else <
+	      jmp sendsp	; send a space
+	      >
+          rts r5
+	  >
+	cmpb #'[,r0		; [?? (large [ requested)
+	if eq,<
+	  pop *			; PRINTP val: non-zero implies print
+	  if ne,<
+	    push r2		; IOAC arg: channel id
+	    call ioac		; print string of chars forming a large [
+	      .litrl <
+	        .ascii "]@]S9`"
+		.byte 12,12
+		.ascii "=]S"
+		.byte 76
+		.asciz "9="
+		>
+	      >
+	    else <
+	      jmp sendsp	; send a space
+	      >
+          rts r5
+	  >
+	cmpb #'],r0		; ]?? (large ] requested)
+	if eq,<
+	  pop *			; PRINTP val: non-zero implies print
+	  if ne,<
+	    push r2		; IOAC arg: channel id
+	    call ioac		; print string of chars forming a large ]
+	      .litrl <
+	        .ascii "]@]S9"
+		.byte 17,136,136,12,12,16
+		.ascii "=]S@"
+		.byte 17
+		.asciz "9="
+		>
+	      >
+	    else <
+	      jmp sendsp	; send a space
+	      >
+          rts r5
+	  >
+	cmpb #'^,r0		; ^?? (Integral sign requested)
+	if eq,<
+	  pop *			; PRINTP val: non-zero implies print
+	  if ne,<
+	    push r2		; IOAC arg: channel id
+	    call ioac		; print string of chars forming a integral sign
+	      .litrl <
+	        .ascii "]@]S9H"
+		.byte 12,12
+		.asciz "=]S@9="	  
+		>
+	      >
+	    else <
+	      jmp sendsp	; send a space
+	      >
+          rts r5
+	  >
+	pop *			; remove val from call to printp
+
+; character gotten after the \ was invalid, report error
+
+	push uoch(r4)		; IOAC arg: channel id
+	call ioac		; report error to the user
+	  .string ^"Bad escape character - "
+	push uoch(r4),r0	; WCHAR args: channel id, character
+	call wchar		; tell user what the offending char is
+	jsr pc,crlf		; send a CRLF
+	rts r5
+
+; SENDSP sends a space to the channel id in R2
+
+sendsp: push r2,#40		; WCHAR args: channel id, character
+	call wchar		; send a space
+	rts r5

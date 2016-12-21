@@ -1,0 +1,688 @@
+; -*-PALX-*-
+
+; The IO module
+
+
+
+.sbttl	Definitions
+
+; DIM definition structure.  Each entry contains a JMP instruction to the
+; DIM's entry point for the specified operation.  The IO module translates
+; various IO calls into a call indirect through one of these entries.
+dsect <
+ioatt::	 .blkw 2		; JMP to attach entry
+iodet::	 .blkw 2		; JMP to detach entry
+ioordr:: .blkw 2		; JMP to order entry
+ioread:: .blkw 2		; JMP to read entry
+iowrit:: .blkw 2		; JMP to write entry
+iodel::	 .blkw 2		; JMP to delete entry
+ioren::	 .blkw 2		; JMP to rename entry
+iopeek:: .blkw 2		; JMP to peek entry
+	>
+
+; DEFDIM is a macro to create a DIM definition structure.  All entry points
+; must be specified (unimplemented operations should use an entry which does
+; a LOSE %EBDIO).
+.macro	defdim a1,a2,a3,a4,a5,a6,a7,a8
+	.irp a,<a1,a2,a3,a4,a5,a6,a7,a8>
+	  .lif b  a
+	    .error Missing DIM entry point
+	  jmp a
+	.endm
+.endm
+
+
+; Attach control bits
+%icrea==1			; create file (rather than using existing one)
+%iupd==2			; want update permission (writing)
+
+.sbttl	IO system initialization
+
+; IOINIT clears all the DIMTAB entires thus freeing every channel.
+; Also every CHLTAB entry is set to a channel id which could legitemately
+; reside there.
+ioinit:	mov pc,r1		; get ptr to DIMTAB array
+	add #dimtab-.,r1	; ...
+	mov #100,r0		; start counter first legit channel id
+loop <	  mov r0,chltab-dimtab(r1)	; set CHLTAB entry
+	  clr (r1)+		; clear DIMTAB entry
+	  inc r0		; advance counter
+	  cmp r0,#100+64.	; done all 64 entries?
+	  rptl lo
+	  >
+	return
+
+.sbttl	READL
+
+; READL reads a line from the terminal into the specified input buffer.
+
+;	ARGS:				VALS:
+; SP ->	ptr to buffer		 SP ->	no. of chars
+;	buffer size
+;	output channel id
+;	input channel id
+
+readl:	push r0,r1,r2		; save regs
+10$:	mov 10(sp),r2		; get ptr to buffer
+	mov 12(sp),r1		; get no. of characters in buffer
+	add r2,r1		; get ptr to beyond last char in buffer
+20$:
+ loop <	  push 16(sp)		; RCHAR arg: channel id
+	  call rchar		; get input character
+	  pop r0		; val: character
+	  cmp r0,#15		; CR?
+	  exitl eq
+	  cmp r0,#'		; ^U?
+	  if eq,<
+	    push 14(sp),#15	; WCHAR args: channel id, character
+	    call wchar		; Type CR
+	    push 14(sp),#%tdeol	; WCHAR args: channel id, character
+	    call wchar		; Type Erase to end of line
+	    br 10$
+	    >
+	  cmp r0,#177		; RUBOUT?
+	  if eq,<
+	    cmp r2,10(sp)	; anything in buffer (ptr at beginning)?
+	    beq 1$		; yes, feep at loser
+	    push 14(sp)		; RUBOUT arg: channel id
+	    movb -(r2),-(sp)	; RUBOUT arg: character
+	    call rubout		; rubout character
+	    rptl
+	    >
+	  cmp r0,#14		; ^L?
+	  if eq,<		; clear screen and retype line
+	    push 14(sp),#%tdclr	; WCHAR args: channel id, character
+	    call wchar		; clear screen
+	    br 2$
+	    >
+	  cmp r0,#'		; ^R?
+	  if eq,<
+	    push 14(sp),#15	; WCHAR args: channel id, character
+	    call wchar		; Type CR
+	    push 14(sp),#12	; WCHAR args: channel id, character
+	    call wchar		; Type LF
+	    br 2$
+	    >
+	  cmp r0,#'		; ^W?
+	  if eq,<
+    loop <    cmp r2,10(sp)
+	      exitl eq
+	      movb -(r2),r0
+	      push 14(sp),r0	; RUBOUT args: channel id, character
+	      call rubout	; rubout character
+	      push r0		; CHBITS arg: character
+	      call chbits	; get bits describing character
+	      bit #%alpha+%numer,(sp)+	; val: bits, test for alphanumeric
+	      rptl eq		; keep going until get one
+	      >
+    loop <    cmp r2,10(sp)
+	      exitl eq
+	      movb -1(r2),r0
+	      push r0		; CHBITS arg: character
+	      call chbits	; get bits describing character
+	      bit #%alpha+%numer,(sp)+	; val: bits, test for alphanumeric
+	      exitl eq
+	      dec r2
+	      push 14(sp),r0	; RUBOUT args: channel id, character
+	      call rubout	; rubout character
+	      rptl
+	      >
+	    rptl
+	    >
+	  cmp r2,r1		; more input than room in buffer?
+  	  beq 1$
+	  movb r0,(r2)+		; put character in buffer
+	  push 14(sp),r0	; WCHAR arg: channel id, character
+	  call wchar		; echo input character
+	  rptl
+1$:	  push 14(sp),#%tdbel	; WCHAR arg: channel id, character
+	  call wchar		; feep at luser
+	  rptl
+; Retype line so far
+2$:	  mov 10(sp),r1		; use R1 as ptr to scan buffer with
+loop <	    cmp r1,r2		; typed out everything yet?
+	    exitl eq		; yep
+	    push 14(sp)		; WCHAR arg1: channel id
+	    movb (r1)+,-(sp)	; WCHAR arg2: character
+	    call wchar		; retype character
+	    rptl
+	    >
+	  mov 10(sp),r1		; restore r1 as ptr to end of buffer
+	  add 12(sp),r1		; ...
+	  jmp 20$
+	  >
+	push 14(sp),#15		; WCHAR arg: channel id, character
+	call wchar		; Echo CRLF
+	push 14(sp),#12		; WCHAR arg: channel id, character
+	call wchar
+	mov r2,16(sp)		; calculate no. of characters read
+	sub 10(sp),16(sp)	; ...
+	pop r2,r1,r0,4(sp)	; restore regs, remove three args from stack
+	cmp (sp)+,(sp)+		; ...
+	return
+
+
+; RUBOUT echoes a rubout.  On a display it erases the last character from
+; the screen.  On a printing terminal it simply echoes the character rubbed
+; out.
+
+;	ARGS:				VALS:
+; SP ->	character			(none)
+;	channel id
+
+rubout:	push 4(sp)		; ORDER arg: channel id
+	push #10000+topt,#0	; ORDER args: order code, order arg
+	call order		; read TOPT
+	bit #%toers,(sp)	; can terminal erase?
+	if eq,<			; no
+	  bit #%toovr,(sp)	; can terminal overstrike?
+	  if ne,<
+	    tst (sp)+		; remove TOPT word from stack
+	    push 4(sp)		; WCHAR arg: channel id
+	    push 2+2(sp)	; WCHAR arg: character
+	    call wchar		; echo character rubbed out
+	    br 1$
+	    >
+	  >
+	tst (sp)+		; remove TOPT word from stack
+	push 4(sp),#%tders	; WCHAR args: channel id, char (software code)
+	call wchar		; erase character before cursor and back up
+	cmpb 2(sp),#40		; control character?
+	bhis 1$
+	push 4(sp),#%tders	; WCHAR args: channel id, char (software code)
+	call wchar		; erase character before cursor and back up
+1$:	pop (sp),(sp)		; remove arguments from stack
+	return
+
+
+; CHBITS
+
+;	ARGS:				VALS:
+; SP ->	character		 SP ->	bits
+
+chbits:	push r0			; save reg
+	mov 4(sp),r0		; get character argument
+	bic #177600,r0		; clear garbage bits
+	add pc,r0		; for PICness
+	movb chtbl-.(r0),4(sp)	; lookup character bits in table
+	clrb 5(sp)		; make sure high byte is zero
+	pop r0			; restore reg
+	return
+
+; CHTBL is a lookup table, indexed by character code.
+
+%print==1			; character is printable
+%alpha==2			; alphabetic (i.e. A-Z and a-z)
+%numer==4			; numeric (i.e. 0-9)
+
+chtbl:
+.rept 32.			; control characters
+	.byte 0
+.endr
+.rept 16.
+	.byte %print		; random characters
+.endr
+.rept 10.
+	.byte %print+%numer
+.endr
+.rept 7.			; random characters
+	.byte %print
+.endr
+.rept 26.			; upper case letters
+	.byte %print+%alpha
+.endr
+.rept 6.			; random characters
+	.byte %print
+.endr
+.rept 26.			; lower case letters
+	.byte %print+%alpha
+.endr
+.rept 4.			; random characters
+	.byte %print
+.endr
+	.byte 0			; rubout
+
+.iif ne  chtbl+128.-.,	.error	CHTBL wrong size?
+
+.sbttl	Cursor movement
+
+; POSITN moves the cursor to the specified position.
+
+;	ARGS:				VALS:
+; SP ->	horizontal pos			(none)
+;	vertical pos
+;	channel id
+
+posit:	push uoch(r4),#%tdmov	; WCHAR args: channel id, character
+	call wchar		; send software TTY code to move cursor
+	push uoch(r4),4+2(sp)	; WCHAR args: channel id, character
+	inc (sp)		; positions have to be sent +1
+	call wchar		; send vertical postion
+	push uoch(r4),2+2(sp)	; WCHAR args: channel id, character
+	inc (sp)		; positions have to be sent +1
+	call wchar		; send horizontal position
+	pop (sp),(sp),(sp)	; remove arguments from stack
+	return
+
+.sbttl	Delete and Rename
+
+; DELETE deletes a file from the device attached to the specified channel.
+
+;	ARGS:				VALS:
+; SP -> disk unit number	 SP ->	error code
+;	file id
+;	device id
+
+delete:	push 6(sp)		; IODEV arg: device id
+	jsr r1,iodev		; lookup device
+	mov r0,22(sp)		; return error code
+	if eq,<			; no error?
+	  mov 20(sp),r3		; pass file name in R3
+	  mov 16(sp),r1		; put disk unit number in R1
+	  jsr r5,iodel(r5)	; delete file
+	  mov r0,22(sp)		; copy error code to return slot
+	  >
+	jsr r0,iorest		; restore regs
+	pop (sp),(sp)		; remove two args from stack
+	return
+
+
+; RENAME renames a file on the device attached to the specified channel.
+
+;	ARGS:				VALS:
+; SP ->	disk unit number	 SP ->	error code
+;	new file id
+;	old file id
+;	device id
+
+rename:	push 10(sp)		; IODEV arg: device id
+	jsr r1,iodev		; lookup device id
+	mov r0,24(sp)		; save error code in return val slot
+	if eq,<
+	  mov 22(sp),r3		; pass old file name in R3
+	  mov 20(sp),r2		; pass new file name in R2
+	  mov 16(sp),r1		; put disk unit number in R1
+	  jsr r5,ioren(r5)	; rename file
+	  mov r0,24(sp)		; save error code in return val slot
+	  >
+	jsr r0,iorest		; restore regs
+	pop (sp),(sp),(sp)	; remove three args from stack
+	return
+
+.sbttl	Attach and Detach
+
+; ATTACH creates a new channel and attaches it to the specified device
+; interface module.  Device id and file id are ptrs to asciz strings
+; containing the device name and file name.  The device name is looked up
+; and the attach entry of the DIM is called.  The file name is passed in
+; R3, the unit number is passed in R1, and the control bits in R2.
+; The DIM returns a data word in R4 (this data word is
+; passed to i/o entries) and an error code in R0.  If the DIM
+; attach succeeds then a channel id is conjured up and returned.
+;
+;	ARGS:				VALS:
+; SP ->	control bits		 SP ->	channel id
+;	unit number			error code
+;	file id
+;	device id
+
+
+attach:	push 10(sp)		; IODEV arg: device id
+	jsr r1,iodev		; lookup device id
+	mov r0,24(sp)		; val: error code (also R5 is a ptr to DIM)
+	bne 1$
+	mov pc,r1		; ptr to DIMTAB
+	add #dimtab-.,r1	; ...
+	mov r1,r4		; copy ptr
+	mov #64.,r0		; no. of entries in DIMTAB
+	peof			; no preemption while scanning DIMTAB
+loop <	  tst (r1)+		; entry free?
+	  exitl eq		; yes, use it
+	  sorl r0
+	  mov #%enach,24(sp)	; no free entries!  return error code
+	  clr 22(sp)		; return zero channel id for safety
+	  peon			; allow preemption again
+	  br 1$
+	  >
+	mov r5,-(r1)		; save ptr to DIM in DIMTAB
+	peon			; allow preemption again
+2$:	add #100,chltab-dimtab(r1)	; add 1 to high part of channel id
+	bcs 2$				; don't allow a high part of zero
+	mov chltab-dimtab(r1),r4	; get channel id
+	mov 16(sp),r2		; get control bits
+	mov 22(sp),r3		; get file id
+	mov r4,22(sp)		; store channel id in return val slot
+	push r1			; save ptr into DIMTAB
+	mov 22(sp),r1		; put unit # in R1
+	jsr r5,ioatt(r5)	; call DIM attach entry
+	pop r1			; restore ptr into DIMTAB
+	mov r0,24(sp)		; store error code
+ 	if eq,<
+	  mov r4,ddwtab-dimtab(r1)	; set DIM data word
+	  inc nioch		; increment no. of i/o channels in use
+	  >
+	else <
+	  clr (r1)		; attach error, clear DIMTAB entry, freeing ch
+	  clr 22(sp)		; return zero channel id for safety
+	  >
+1$:	jsr r0,iorest		; restore regs
+	pop (sp),(sp)		; remove two args from stack
+	return
+
+
+
+; DETACH destroys the attachment of a channel to a device interface
+; module.  The channel id is no longer valid.  The DIM detach entry
+; is called to inform the DIM of the detachment.  The DIM data word
+; for the channel is passed in R4.
+
+;	ARGS:				VALS:
+; SP ->	channel id			(none)
+
+detach:	push 2(sp)		; IOCALL arg: channel id
+	jsr r1,iocall		; lookup channel id
+	clr dimtab-io1(r0)	; free channel
+	jsr r5,iodet(r5)	; call DIM detach entry point
+	dec nioch		; decrement no. of i/o channels in use
+	jsr r0,iorest		; restore regs
+	pop (sp)		; remove arg from stack
+	return
+
+.sbttl	Read entries
+
+; RCHAR reads one character from the specified channel.  The DIM read
+; entry is called to get the char.  It is expected to return a character
+; (or -1 to indicate end of file) in R0.  The DIM data word for the
+; channel is passed in R4.
+
+;	ARGS:				VALS:
+; SP ->	channel id		 SP ->	character
+
+rchar:	push 2(sp)		; IOCALL arg: channel id
+	jsr r1,iocall		; io setup
+	jsr r5,ioread(r5)	; call DIM to read a character
+	mov r0,16(sp)		; return character
+	jsr r0,iorest		; restore regs
+	return
+
+
+; READN reads a specified no. of characters from a channel.  The DIM
+; read entry is called repeatedly until the buffer has been filled or the
+; end of file reached.  The DIM is expected to return a character (or -1
+; to indicate end of file) in R0.  The DIM data word for the channel
+; is passed in R4.
+
+;	ARGS:				VALS:
+; SP ->	no. of chars		 SP ->	decremented char count
+;	buffer ptr
+;	channel id
+
+readn:	push 6(sp)		; IOCALL arg: channel id
+	jsr r1,iocall		; io setup
+loop <	  jsr r5,ioread(r5)	; read a character
+	  tst r0		; end of file?
+	  exitl mi
+	  movb r0,@20(sp)	; store character in buffer
+	  inc 20(sp)		; update ptr
+	  dec 16(sp)		; decrement count
+	  rptl ne
+	  >
+	jsr r0,iorest		; restore regs
+	pop 2(sp),2(sp)		; pop ret R5 into arg 2's slot, pop dec'd
+	return			; char count into arg 1's slot
+
+
+.if ne asmpek
+; PCHAR reads one character from the specified channel, without
+; removing it from the input buffer.  The DIM read
+; entry is called to get the char.  It is expected to return a character
+; (or -1 to indicate end of file) in R0.  The DIM data word for the
+; channel is passed in R4.
+
+;	ARGS:				VALS:
+; SP ->	channel id		 SP ->	character
+
+pchar:	push 2(sp)		; IOCALL arg: channel id
+	jsr r1,iocall		; io setup
+	jsr r5,iopeek(r5)	; call DIM to read a character
+	mov r0,16(sp)		; return character
+	jsr r0,iorest		; restore regs
+	return
+.endc
+
+.sbttl	Write entries
+
+; WCHAR writes one character to the specified channel.  The DIM write
+; entry is called and passed the character in R0.  The DIM data word
+; for the channel is passed in R4.
+
+;	ARGS:				VALS:
+; SP ->	character		 SP ->	(none)
+;	channel id
+
+wchar:	push 4(sp)		; IOCALL arg: channel id
+	jsr r1,iocall		; io setup
+	mov 16(sp),r0		; character to write
+	bic #177400,r0		; leave only low byte
+	jsr r5,iowrit(r5)	; write char
+	jsr r0,iorest		; restore regs
+	pop (sp),(sp)		; remove args from stack
+	return
+
+
+; WRITEC is like WRITEZ but takes its argument as a relative ptr after the
+; call.
+
+;	ARGS:				VALS:
+; SP ->	channel id			(none)
+
+writec:	push (sp)		; create slot for WRITEZ arg
+	mov r5,2(sp)		; pick up relative ptr after call
+	add (r5)+,2(sp)		; and convert to absolute
+; fall through to WRITEZ
+
+
+; WRITEZ writes an asciz string to a channel.  This call is turned
+; into a call to WRITEN by calculating the length of the asciz string.
+
+;	ARGS:				VALS:
+; SP ->	string ptr		 SP ->	(none)
+;	channel id
+
+writez:	push (sp),r1		; make slot for char count, save reg
+	mov 6(sp),r1		; ptr to asciz string
+	clr 4(sp)		; start character count at zero
+loop <	  tstb (r1)+		; null terminates
+	  exitl eq
+	  inc 4(sp)		; increment character count
+	  rptl
+	  >
+	pop r1			; restore reg
+; fall through to WRITEN
+
+
+; WRITEN writes a specified no. of chars to a channel.  The DIM write
+; entry point is called repeatedly with each character of the string.
+; The character is passed in R0.  The DIM data word for the channel is
+; passed in R4.
+
+;	ARGS:				VALS:
+; SP ->	no. of chars		 SP ->	(none)
+;	buffer ptr
+;	channel id
+
+writen:	push 6(sp)		; IOCALL arg: channel id
+	jsr r1,iocall		; io setup
+	tst 16(sp)		; character count zero?
+	if ne,<
+  loop <    movb @20(sp),r0	; character to write
+	    inc 20(sp)
+	    bic #177400,r0	; leave only low byte
+	    jsr r5,iowrit(r5)	; write char
+	    dec 16(sp)		; decrement count
+	    rptl ne
+	    >
+	  >
+	jsr r0,iorest		; restore reg
+	pop 4(sp)		; remove args from stack
+	cmp (sp)+,(sp)+		; ...
+	return
+
+.sbttl	Order
+
+; ORDER passes the order code to the DIM in R3 and the order argument in R2.
+; The DIM may interpret these in any way it chooses.  The DIM returns a value
+; in R0 which is returned to the caller.
+
+;	ARGS:				VALS:
+; SP ->	order argument		 SP ->	return value
+;	order code
+;	channel id
+
+order:	push 6(sp)		; IOCALL arg: channel id
+	jsr r1,iocall		; io setup
+	mov 20(sp),r3		; order code
+	mov 16(sp),r2		; random order argument
+	jsr r5,ioordr(r5)	; call order entry
+	mov r0,22(sp)		; store return value
+	jsr r0,iorest		; restore regs
+	pop (sp),(sp)		; remove one arg from stack
+	return
+
+; STATUS returns an error code indicating the status of the device
+; attached (0 if no error).  The DIM's status entry is called.  It
+; is expected to return an error code (status code) in R0.  The DIM
+; data word for the channel is passed in R4.
+
+.sbttl	Device hackery
+
+; IODEV is called only by the I/O system entries.  It takes one arg on
+; the stack which is the device id to lookup (device ids are ptrs to asciz
+; device names).  It also saves the regs on the stack in a funny way.  On
+; return R5 is a ptr the DIM and R0 is an error code.  To cleanup from a
+; call to IODEV use IOREST.
+
+; Note: IODEV is called by JSR R1,IODEV.
+
+iodev:	push r2,r3,r4,r5	; save regs (R1 on stack from call)
+	mov 12(sp),r5		; device id
+	mov r0,12(sp)		; save reg
+	mov pc,r2		; ptr to DNAMES
+	add #dnames-.,r2	; ...
+loop <	  tst (r2)		; end of table?
+	  exitl eq
+	  mov r2,r3		; convert relative ptr in DNAMES table
+	  add (r2)+,r3		; to an absolute one
+	  push r5		; save reg (ptr to device name to lookup)
+  loop <    cmpb (r5)+,(r3)+	; compare corresponding bytes of the strings
+	    exitl ne
+	    tstb -1(r5)		; both strings terminated (by NULL) ?
+	    rptl ne
+	    pop *		; throw away pushed R5
+	    mov dptrs-dnames-2(r2),r5	; put relative ptr to DIM in R5
+	    add pc,r5		; make absolute
+iod:	    clr r0		; no error
+	    jmp (r1)		; return to caller
+	    >
+	  pop r5		; restore reg (ptr to device name to lookup)
+	  tst (r2)		; at end of DNAMES table?
+	  rptl ne
+	  >
+	mov #%ensdv,r0		; No such device error
+	jmp (r1)		; return to caller
+
+
+; DNAMES is a list of DIM names.  The names are stored as relative ptrs
+; to ASCIZ strings.
+dnames:	.word dskn-.
+.lif ne  nlp
+	.word lptn-.
+	.word ttyn-.
+	.word bufn-.
+	.word 0
+
+dskn:	.asciz "DISK"
+lptn:	.asciz "LPT"
+ttyn:	.asciz "TTY"
+bufn:	.asciz "BUFFER"
+
+	.even
+
+; DPTRS contains relative ptrs to the DIMs.  The ptr addresses a structure
+; as created by DEFDIM, i.e. an array of JMP instructions to the various
+; DIM entry points.
+dptrs:	.word disk-iod
+.if ne  nlp
+  ifSAO <
+	.word tty-iod		; temporary kludge for terminet line printer
+        >
+  ifMIT <
+	.word lpt-iod
+	>
+.endc
+	.word tty-iod
+	.word buf-iod
+
+.sbttl	Channel hackery
+
+; IOCALL is called only by the I/O system entries.  It takes one arg
+; on the stack which is the channel id to lookup.  It also saves the
+; regs on the stack in a funny way.  On return R5 points to the channel
+; structure and R4 is the DIM data word (also R0 is relative ptr into
+; some internal tables, this is used only in DETACH).  To cleanup from
+; a call to IOCALL use IOREST.
+
+; Note: IOCALL is called by JSR R1,IOCALL.
+
+iocall:	push r2,r3,r4,r5	; save regs (R1 on stack from call)
+	mov 12(sp),r5		; channel id
+	mov r0,12(sp)		; save reg
+	mov r5,r0		; copy channel id
+	bic #177700,r0		; low 6 bits
+	asl r0			; for word ops
+	add pc,r0		; for PIC addressing
+io1:	cmp r5,chltab-io1(r0)	; error check, is this the right channel id?
+	if ne,<
+	  lose %ensch		; no bomb
+	  >
+	mov ddwtab-io1(r0),r4	; DIM data word
+	mov dimtab-io1(r0),r5	; DIM ptr
+	jmp (r1)		; return to caller
+
+
+; IOREST is used to clean up after IOCALL.  The regs are restored.
+; Call by JSR R0,IOREST.
+iorest:	pop *,r5,r4,r3,r2,r1
+	rts r0
+
+
+chltab:	.blkw 64.		; table of channel ids
+ddwtab:	.blkw 64.		; table of DIM data words for channels
+dimtab:	.blkw 64.		; table of DIM ptrs for each channel
+
+nioch:	.blkw 1			; no. of i/o channels in use
+
+.sbttl	Buffer DIM
+
+buf:	defdim bufatt,bufdet,bufbad,bufr,bufw,bufbad,bufbad,bufbad
+
+bufatt:	mov r3,r4		; copy buffer ptr into DIM data word
+	clr (r4)		; start character count at zero
+	clr r0			; return no error
+	return
+
+bufdet:	return			; do nothing on detach
+
+bufr:	mov r4,r3		; get DIM data word (ptr to buffer)
+	add (r4),r3		; add count to get ptr into buffer
+	movb 2(r3),r0		; get character from buffer
+	inc (r4)		; increment count
+	return
+
+bufw:	mov r4,r3		; get DIM data word (ptr to buffer)
+	add (r4),r3		; add count to get ptr into buffer
+	movb r0,2(r3)		; put character into buffer
+	inc (r4)		; increment count
+	return
+
+bufbad:	lose %ebdio		; give bad i/o error
